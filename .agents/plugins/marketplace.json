@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "psst-gpt",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "PsstGPT"
   },
   "plugins": [
     {

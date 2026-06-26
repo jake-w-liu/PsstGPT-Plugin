@@ -14,9 +14,18 @@ After this repository is available on GitHub:
 
 ```bash
 codex plugin marketplace add jake-w-liu/PsstGPT-Codex-Plugin
+codex plugin add psst-gpt@psst-gpt
 ```
 
-Then install **PsstGPT** from the Codex plugin UI and start a new Codex thread.
+Then start a new Codex thread.
+
+If you previously added the early marketplace build and Codex printed `Added marketplace personal`, refresh it with:
+
+```bash
+codex plugin marketplace remove personal
+codex plugin marketplace add jake-w-liu/PsstGPT-Codex-Plugin
+codex plugin add psst-gpt@psst-gpt
+```
 
 ## Install Locally
 
@@ -101,13 +110,21 @@ The implementation lives under `plugins/psst-gpt` and does not import code from 
 
 ## Slash-Style Command
 
-PsstGPT is packaged as a Codex skill named `psst-gpt`. Current Codex documentation says enabled skills appear in the app slash command list, and skills can be invoked explicitly with `$`. That means the supported command-style forms are:
+PsstGPT is packaged as a Codex skill named `psst-gpt`.
+
+In Codex CLI, plugin skills are invoked with `$` or selected through `/skills`:
 
 ```text
 $psst-gpt <task to send to the ChatGPT app>
 ```
 
-or selecting `psst-gpt` from the `/` menu after the plugin is installed and enabled.
+```text
+/skills
+```
+
+In the Codex desktop app, current Codex documentation says enabled skills also appear in the app slash command list, so `psst-gpt` can be selected there after the plugin is installed and enabled.
+
+Current Codex CLI documentation does not expose plugin-defined top-level commands such as `/psst-gpt`. If you want a local CLI slash prompt, use Codex's custom prompt form `/prompts:psst-gpt`, but Codex documentation marks custom prompts as deprecated in favor of skills.
 
 ## Example
 

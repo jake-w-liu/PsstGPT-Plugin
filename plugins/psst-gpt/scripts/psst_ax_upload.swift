@@ -320,6 +320,32 @@ func waitForComposer(_ appElement: AXUIElement, timeoutMs: Double) throws -> (AX
     }
 }
 
+func didSendStart(_ appElement: AXUIElement, prompt: String) throws -> Bool {
+    let window = try chatWindow(appElement)
+    let state = snapshot(window)
+    if (state["isAnswering"] as? Bool) == true {
+        return true
+    }
+    guard let currentComposer = composer(window) else {
+        return true
+    }
+    let currentValue = normalize(currentComposer.label)
+    return currentValue.isEmpty || currentValue != normalize(prompt)
+}
+
+func pressSendAndVerify(_ record: NodeRecord, appElement: AXUIElement, prompt: String) throws -> Bool {
+    try press(record, "Send")
+    sleepMs(250)
+    do {
+        _ = try waitFor(3_000, intervalMs: 100) {
+            try didSendStart(appElement, prompt: prompt) ? true : nil
+        } as Bool
+        return true
+    } catch {
+        return false
+    }
+}
+
 func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Double) throws {
     let (window, composerRecord) = try waitForComposer(appElement, timeoutMs: 15_000)
     guard let composerPosition = composerRecord.position, let composerSize = composerRecord.size else {
@@ -380,17 +406,21 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
     } as Bool
 }
 
-func sendIfNeeded(_ appElement: AXUIElement) throws {
+func sendIfNeeded(_ appElement: AXUIElement, prompt: String) throws {
     var window = try chatWindow(appElement)
     if (snapshot(window)["isAnswering"] as? Bool) == true { return }
-    if let send = firstRecord(window, role: kAXButtonRole, matching: "^Send$"), send.enabled ?? true {
-        try press(send, "Send")
+    if let send = firstRecord(window, role: kAXButtonRole, matching: "^Send$"), send.enabled ?? true,
+       try pressSendAndVerify(send, appElement: appElement, prompt: prompt) {
         return
     }
     if let currentComposer = composer(window), let composerPosition = currentComposer.position, let composerSize = currentComposer.size {
         let composerBottom = composerPosition.y + min(composerSize.height, 360)
         let candidates = descendants(window).map(record).filter { item in
             guard item.role == kAXButtonRole, item.enabled ?? true, let position = item.position, let size = item.size else {
+                return false
+            }
+            if normalize(item.label).range(of: "ChatGPT|New chat|Share|Move|Sidebar|close|minimize|full screen|5\\.[0-9]|4\\.5|o3|Pro|Thinking",
+                                           options: [.regularExpression, .caseInsensitive]) != nil {
                 return false
             }
             let centerY = position.y + size.height / 2
@@ -402,9 +432,10 @@ func sendIfNeeded(_ appElement: AXUIElement) throws {
                 size.height >= 16 &&
                 size.height <= 80
         }.sorted { ($0.position?.x ?? 0) > ($1.position?.x ?? 0) }
-        if let candidate = candidates.first {
-            try press(candidate, "Send")
-            return
+        for candidate in candidates {
+            if try pressSendAndVerify(candidate, appElement: appElement, prompt: prompt) {
+                return
+            }
         }
     }
     key(36)
@@ -446,7 +477,7 @@ func run(_ input: Input) throws -> [String: Any] {
     for filePath in input.filePaths {
         try uploadFile(filePath, appElement: appElement, uploadTimeoutMs: uploadTimeoutMs)
     }
-    try sendIfNeeded(appElement)
+    try sendIfNeeded(appElement, prompt: input.prompt)
 
     let timeoutMs = normalizeTimeoutMs(input.timeoutMs, fallback: 0)
     let stableMs = input.responseStableMs ?? 8_000

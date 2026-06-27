@@ -52,8 +52,9 @@ Do not inspect cookies, local storage, passwords, app databases, browser session
 - Do not use macOS file upload dialogs, clipboard file paste, Finder automation, screenshots, or foreground activation for strict-background PsstGPT. The dedicated `uploadAuditPsstGPT` path may use the native file picker and a temporary, restored clipboard path paste because that mode is explicitly foreground automatic.
 - If the app shows login, CAPTCHA, verification, permission, or account prompts, stop and report the helper error.
 - If the app is still answering, keep waiting or poll the same session. Do not answer the user's task locally as a substitute.
+- For audit workflows, the helper retries short acknowledgement-only final replies such as "I will audit..." and asks ChatGPT to do the audit immediately. Treat the retried result as the helper output; do not manually summarize or replace it.
 - The helper reports only visible app UI state. Do not claim hidden backend model state.
-- Polling can only inspect the currently visible app conversation; PsstGPT cannot reopen stored conversations by URL.
+- Polling can return an already complete stored response when the active transcript no longer exposes the original prompt. Pending sessions still require the currently visible app conversation; PsstGPT cannot reopen stored conversations by URL.
 
 ## Node REPL Usage
 

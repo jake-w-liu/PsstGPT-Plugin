@@ -25,6 +25,7 @@ const MAX_VISIBLE_COMPOSER_HEIGHT = 360;
 const DEFAULT_AUDIT_CHUNK_CHARS = 45000;
 const DEFAULT_AUDIT_MAX_FILE_BYTES = 512 * 1024;
 const DEFAULT_AUDIT_MAX_TOTAL_BYTES = 6 * 1024 * 1024;
+const DEFAULT_AUDIT_ACK_RETRY_LIMIT = 2;
 const DEFAULT_UPLOAD_SHARD_BYTES = 20 * 1024 * 1024;
 const DEFAULT_UPLOAD_MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const DEFAULT_UPLOAD_MAX_SINGLE_FILE_BYTES = DEFAULT_UPLOAD_SHARD_BYTES;
@@ -142,9 +143,17 @@ export async function pollPsstGPT(options = {}) {
   await ensureChatGPTAppReady({ background, verify: false });
   const currentState = await readPsstGPTState({ background });
   if (!transcriptContainsPrompt(currentState, session.prompt)) {
+    const storedResult = storedCompleteAppRelayResult(session, currentState);
+    if (storedResult) {
+      return {
+        ...storedResult,
+        recoveredFromStore: true,
+        recoveryReason: "active prompt was not visible in the ChatGPT app transcript",
+      };
+    }
     throw codedError(
       "PSST_GPT_SESSION_NOT_ACTIVE",
-      "The stored PsstGPT session is not visible in the active ChatGPT app window. PsstGPT cannot reopen prior conversations by URL.",
+      "The stored PsstGPT session is not visible in the active ChatGPT app window and no complete stored assistant response is available. PsstGPT cannot reopen prior conversations by URL.",
       { session: publicAppSession(session) }
     );
   }
@@ -698,7 +707,21 @@ export async function uploadAuditPsstGPT(options = {}) {
       relaySessionId,
       tags: dedupe([...tags, "upload-bundle"]),
     });
-    return persistUploadAuditResult({ result, bundle });
+    const substantiveResult = await ensureSubstantiveAuditResult({
+      result,
+      requestedPrompt: finalPrompt,
+      bundleId: bundle.bundleId,
+      retryLimit: options.auditAckRetryLimit,
+      relayOptions: {
+        timeoutMs,
+        waitChunkMs,
+        statePath,
+        relaySessionId,
+        background: true,
+        tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
+      },
+    });
+    return persistUploadAuditResult({ result: substantiveResult, bundle });
   }
 
   await relayPromptWithFileUploads({
@@ -752,7 +775,21 @@ export async function uploadAuditPsstGPT(options = {}) {
     background: true,
     tags: dedupe([...tags, "upload-bundle"]),
   });
-  return persistUploadAuditResult({ result, bundle });
+  const substantiveResult = await ensureSubstantiveAuditResult({
+    result,
+    requestedPrompt: finalPrompt,
+    bundleId: bundle.bundleId,
+    retryLimit: options.auditAckRetryLimit,
+    relayOptions: {
+      timeoutMs,
+      waitChunkMs,
+      statePath,
+      relaySessionId,
+      background: true,
+      tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
+    },
+  });
+  return persistUploadAuditResult({ result: substantiveResult, bundle });
 }
 
 async function collectUploadFiles(root, {
@@ -1226,6 +1263,7 @@ async function relayAuditBundleText({
   prompt,
   chunkChars = DEFAULT_AUDIT_CHUNK_CHARS,
   tags = [],
+  auditAckRetryLimit,
   ...relayOptions
 }) {
   const normalizedChunkChars = Math.max(8000, Number(chunkChars) || DEFAULT_AUDIT_CHUNK_CHARS);
@@ -1237,16 +1275,32 @@ async function relayAuditBundleText({
     );
   }
 
+  const relaySessionId = relayOptions.relaySessionId || `app-${Date.now()}`;
+  const sharedRelayOptions = {
+    ...relayOptions,
+    relaySessionId,
+  };
+
   if (`${prompt}\n\n${bundleText}`.length <= normalizedChunkChars) {
-    return runPsstGPT({
-      ...relayOptions,
+    const result = await runPsstGPT({
+      ...sharedRelayOptions,
       prompt: `${prompt}\n\nBEGIN AUDIT BUNDLE ${bundle.bundleId}\n\n${bundleText}\nEND AUDIT BUNDLE ${bundle.bundleId}`,
       tags,
+    });
+    return ensureSubstantiveAuditResult({
+      result,
+      requestedPrompt: prompt,
+      bundleId: bundle.bundleId,
+      retryLimit: auditAckRetryLimit,
+      relayOptions: {
+        ...sharedRelayOptions,
+        tags: dedupe([...tags, "audit-ack-retry"]),
+      },
     });
   }
 
   await runPsstGPT({
-    ...relayOptions,
+    ...sharedRelayOptions,
     prompt: [
       `You will receive a PsstGPT audit bundle in ${chunks.length} chunks.`,
       "Do not audit until I send FINAL AUDIT REQUEST.",
@@ -1260,7 +1314,7 @@ async function relayAuditBundleText({
 
   for (let index = 0; index < chunks.length; index += 1) {
     await continuePsstGPT({
-      ...relayOptions,
+      ...sharedRelayOptions,
       prompt: [
         `AUDIT BUNDLE CHUNK ${index + 1}/${chunks.length}`,
         `Bundle ID: ${bundle.bundleId}`,
@@ -1274,8 +1328,8 @@ async function relayAuditBundleText({
     });
   }
 
-  return continuePsstGPT({
-    ...relayOptions,
+  const result = await continuePsstGPT({
+    ...sharedRelayOptions,
     prompt: [
       "FINAL AUDIT REQUEST.",
       `Bundle ID: ${bundle.bundleId}`,
@@ -1284,6 +1338,16 @@ async function relayAuditBundleText({
       "Return only the audit.",
     ].join("\n"),
     tags,
+  });
+  return ensureSubstantiveAuditResult({
+    result,
+    requestedPrompt: prompt,
+    bundleId: bundle.bundleId,
+    retryLimit: auditAckRetryLimit,
+    relayOptions: {
+      ...sharedRelayOptions,
+      tags: dedupe([...tags, "audit-ack-retry"]),
+    },
   });
 }
 
@@ -1314,6 +1378,85 @@ function chunkArray(values, size) {
     chunks.push(values.slice(index, index + size));
   }
   return chunks;
+}
+
+async function ensureSubstantiveAuditResult({
+  result,
+  requestedPrompt,
+  bundleId,
+  relayOptions = {},
+  retryLimit = DEFAULT_AUDIT_ACK_RETRY_LIMIT,
+} = {}) {
+  const normalizedRetryLimit = Math.max(0, Math.min(5, Number(retryLimit) || 0));
+  if (
+    !result ||
+    result.status !== "complete" ||
+    normalizedRetryLimit === 0 ||
+    isExactOutputRequest(requestedPrompt) ||
+    !isLikelyAcknowledgementOnlyAuditResponse(result.assistantText)
+  ) {
+    return result;
+  }
+
+  let latest = result;
+  for (let attempt = 1; attempt <= normalizedRetryLimit; attempt += 1) {
+    latest = await continuePsstGPT({
+      ...relayOptions,
+      newChat: false,
+      returnAfterSend: false,
+      returnPending: false,
+      prompt: buildAuditRetryPrompt({
+        bundleId,
+        requestedPrompt,
+        attempt,
+      }),
+    });
+    if (
+      latest.status !== "complete" ||
+      !isLikelyAcknowledgementOnlyAuditResponse(latest.assistantText)
+    ) {
+      return latest;
+    }
+  }
+  return latest;
+}
+
+function buildAuditRetryPrompt({ bundleId, requestedPrompt, attempt } = {}) {
+  return [
+    "The previous answer only acknowledged the audit request.",
+    "Do the audit now in this message.",
+    bundleId ? `Bundle ID: ${bundleId}` : "",
+    "Use only the already provided PsstGPT bundle or uploaded files.",
+    "Return confirmed findings ordered by severity with exact file and line citations when findings exist.",
+    "If there are no confirmed correctness bugs, say that clearly and list residual risks or missing tests.",
+    "Do not acknowledge, promise, plan, or say you will audit later.",
+    attempt ? `Retry attempt: ${attempt}` : "",
+    requestedPrompt ? `Original audit request:\n${String(requestedPrompt).trim()}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function isExactOutputRequest(text = "") {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  return /\buser request:\s*(?:reply|return|output|print|say)\s+exactly\b/.test(normalized) ||
+    /^(?:reply|return|output|print|say)\s+exactly\b/.test(normalized);
+}
+
+function isLikelyAcknowledgementOnlyAuditResponse(text = "") {
+  const normalized = normalizeWhitespace(text).toLowerCase();
+  if (!normalized || normalized.length > 700) {
+    return false;
+  }
+  if (/^(?:ready|ack(?:\s+\d+)?|okay|ok|understood|got it|noted|sure)\.?$/.test(normalized)) {
+    return true;
+  }
+  if (/^(?:sure|okay|ok|understood|got it|noted)[,!. ]+(?:i|i'll|i’ll|i will|will)\b/.test(normalized)) {
+    return true;
+  }
+  if (/^(?:i(?:'ll|’ll| will| can| am going to)|we(?:'ll|’ll| will| can))\b/.test(normalized)) {
+    return /\b(?:audit|review|inspect|analy[sz]e|check|report|look at|use only|provided bundle|bundle chunks|uploaded files)\b/.test(normalized);
+  }
+  return /\b(?:i(?:'ll|’ll| will)|we(?:'ll|’ll| will))\b.*\b(?:audit|review|inspect|analy[sz]e|report)\b/.test(normalized) &&
+    !/\b(?:finding|findings|bug|bugs|issue|issues|risk|risks|line|lines|src\/|test\/|readme|no confirmed)\b/.test(normalized);
 }
 
 async function relayPromptToChatGPTApp(options = {}) {
@@ -1658,7 +1801,8 @@ function transcriptContainsPrompt(state = {}, prompt = "") {
   return (state.transcriptTexts ?? []).some((entry) => {
     const text = normalizeForMatch(entry?.text ?? entry);
     return text === promptNeedle ||
-      (promptNeedle.length >= 80 && text.includes(promptNeedle.slice(0, 80)));
+      (promptNeedle.length >= 80 && text.includes(promptNeedle.slice(0, 80))) ||
+      (text.length >= 80 && promptNeedle.includes(text.slice(0, 80)));
   });
 }
 
@@ -1741,6 +1885,42 @@ function appRelayResult({ status, assistantText, state, record }) {
       frontmostProcessName: state.frontmostProcessName,
     },
   };
+}
+
+function storedCompleteAppRelayResult(session, state = {}) {
+  if (session?.status !== "complete") {
+    return null;
+  }
+  const assistantText = latestAssistantTextFromSession(session);
+  if (!assistantText || isAppTransientText(assistantText)) {
+    return null;
+  }
+  return appRelayResult({
+    status: "complete",
+    assistantText,
+    state: {
+      title: state.title ?? session.title ?? "ChatGPT",
+      visibleModelLabel: state.visibleModelLabel ?? session.mode,
+      frontmostProcessName: state.frontmostProcessName,
+      background: state.background ?? session.background ?? true,
+    },
+    record: session,
+  });
+}
+
+function latestAssistantTextFromSession(session = {}) {
+  const messages = Array.isArray(session.messages) ? session.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") {
+      continue;
+    }
+    const text = String(message.text ?? "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
 }
 
 function formatAppFinalDeliveryText({ assistantText = "", relaySessionId = "" } = {}) {
@@ -2903,6 +3083,11 @@ export const __testing = {
   calculateDirectAxRelayTimeoutMs,
   parseDirectAxHelperJson,
   mergeSessionBackground,
+  latestAssistantTextFromSession,
+  storedCompleteAppRelayResult,
+  isExactOutputRequest,
+  isLikelyAcknowledgementOnlyAuditResponse,
+  buildAuditRetryPrompt,
   isPossibleSendButtonRecord,
   visibleComposerBottomY,
   chunkTextByLines,

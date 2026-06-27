@@ -49,6 +49,16 @@ test("transcriptContainsPrompt handles long prompt excerpts", () => {
   assert.equal(__testing.transcriptContainsPrompt(state, prompt), true);
 });
 
+test("transcriptContainsPrompt handles transcript-side long excerpts", () => {
+  const prompt = `${"FINAL AUDIT REQUEST ".repeat(12)}with additional hidden bundle text`;
+  const visibleExcerpt = prompt.slice(0, 100);
+  const state = {
+    transcriptTexts: [visibleExcerpt],
+  };
+
+  assert.equal(__testing.transcriptContainsPrompt(state, prompt), true);
+});
+
 test("completion requires stable non-transient assistant text", () => {
   assert.equal(
     __testing.isAppResponseCompleteSnapshot({
@@ -199,6 +209,82 @@ test("messagesForAppRelay preserves history and replaces trailing assistant upda
     { index: 2, role: "user", text: "Second prompt" },
     { index: 3, role: "assistant", text: "Final answer" },
   ]);
+});
+
+test("storedCompleteAppRelayResult recovers only complete stored assistant text", () => {
+  const completeSession = {
+    relaySessionId: "app-1",
+    status: "complete",
+    mode: "Current ChatGPT app selection",
+    background: true,
+    messages: [
+      { role: "user", text: "Prompt" },
+      { role: "assistant", text: "Final answer" },
+    ],
+  };
+  const result = __testing.storedCompleteAppRelayResult(completeSession, {
+    title: "ChatGPT",
+    visibleModelLabel: "5.1",
+  });
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.assistantText, "Final answer");
+  assert.equal(result.finalDeliveryText, "Final answer\n\nPsstGPT session: app-1");
+
+  assert.equal(
+    __testing.storedCompleteAppRelayResult({ ...completeSession, status: "pending" }),
+    null
+  );
+  assert.equal(
+    __testing.storedCompleteAppRelayResult({
+      ...completeSession,
+      messages: [{ role: "user", text: "Prompt" }],
+    }),
+    null
+  );
+});
+
+test("audit acknowledgement detector catches non-substantive final replies only", () => {
+  assert.equal(
+    __testing.isLikelyAcknowledgementOnlyAuditResponse(
+      "I will audit only the provided bundle chunks and report concrete, line-cited findings grounded in the displayed source."
+    ),
+    true
+  );
+  assert.equal(__testing.isLikelyAcknowledgementOnlyAuditResponse("READY"), true);
+  assert.equal(__testing.isLikelyAcknowledgementOnlyAuditResponse("ACK 2"), true);
+  assert.equal(
+    __testing.isLikelyAcknowledgementOnlyAuditResponse(
+      "No confirmed correctness bugs were found. Residual risks: missing integration tests for the upload path."
+    ),
+    false
+  );
+  assert.equal(
+    __testing.isLikelyAcknowledgementOnlyAuditResponse(
+      "Findings\n\n1. src/main.mjs:42 can throw on empty input because the null check runs after property access."
+    ),
+    false
+  );
+});
+
+test("audit retry prompt is skipped for exact-output requests", () => {
+  assert.equal(__testing.isExactOutputRequest("User request: reply exactly: MARKER"), true);
+  assert.equal(__testing.isExactOutputRequest("reply exactly OK"), true);
+  assert.equal(
+    __testing.isExactOutputRequest(
+      "If the user asks for an exact output string, follow it.\n\nUser request: debug audit the codebase"
+    ),
+    false
+  );
+
+  const prompt = __testing.buildAuditRetryPrompt({
+    bundleId: "bundle-123",
+    requestedPrompt: "debug audit the codebase",
+    attempt: 1,
+  });
+  assert.match(prompt, /Do the audit now/);
+  assert.match(prompt, /bundle-123/);
+  assert.match(prompt, /Do not acknowledge/);
 });
 
 test("parseDirectAxHelperJson accepts pretty helper payloads", () => {

@@ -102,6 +102,8 @@ When you invoke PsstGPT:
 
 The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI.
 
+For audit workflows, PsstGPT treats short acknowledgement-only final replies such as "I will audit..." as incomplete and sends a bounded follow-up that asks ChatGPT to perform the audit immediately. Exact-output marker prompts are excluded from this retry path.
+
 ## Example Prompts
 
 ```text
@@ -136,6 +138,8 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"poll","query":"migration plan","background":true}'
 ```
+
+Polling still requires the active ChatGPT window for unfinished sessions. If a stored session is already complete, `poll` can return the stored assistant response even when the original prompt is no longer visible in the app transcript.
 
 Create a source upload bundle without sending it:
 

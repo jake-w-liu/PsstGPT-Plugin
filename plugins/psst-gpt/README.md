@@ -42,6 +42,7 @@ Linux is not currently targeted because OpenAI's current desktop download page l
 - Supports polling the active app conversation for a stored pending session.
 - Supports strict-background codebase audits by packaging local text files into a line-numbered Markdown bundle and relaying it as text chunks.
 - Supports automatic source uploads for large codebase audits by packaging the tree into zip shards plus an upload manifest, using a direct Swift Accessibility helper for the native file picker, and saving the returned response locally.
+- Retries audit-final responses that are only short acknowledgements such as "I will audit..." instead of treating them as the completed audit. Exact-output marker prompts are not retried.
 - Returns `finalDeliveryText` for verbatim Codex delivery.
 
 Unsupported options fail with `PSST_GPT_UNSUPPORTED_OPTION`.
@@ -75,5 +76,7 @@ Run the live harness:
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"harness","timeoutMs":300000}'
 ```
+
+For complete stored sessions, `poll` can return the persisted assistant response even if the original prompt is no longer visible in the active ChatGPT transcript. Pending sessions still require the active app conversation because PsstGPT cannot reopen older conversations by URL.
 
 Credit: PsstGPT is an independent desktop-app implementation, inspired by the original Chrome-backed [GPT Relay](https://github.com/Toolsai/GPT-Relay-Codex-Plugin-) by Prompt Case. Thanks to him for the relay concept and Codex plugin workflow.

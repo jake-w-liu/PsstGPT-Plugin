@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { __testing } from "./psst_gpt.mjs";
+import { __testing, createPsstGPTAuditBundle, createPsstGPTUploadBundle } from "./psst_gpt.mjs";
 
 test("extractAssistantTextFromAppState reads text after the matching prompt", () => {
   const prompt = "Reply exactly: OK PsstGPT smoke 2026-06-26";
@@ -110,6 +113,45 @@ test("unsupported PsstGPT options fail explicitly", () => {
   );
 });
 
+test("task planner routes full codebase audits to upload", () => {
+  const plan = __testing.resolvePsstGPTTaskPlan({
+    prompt: "debug audit the full codebase",
+  });
+
+  assert.equal(plan.action, "upload-audit");
+  assert.equal(plan.transport, "foreground-upload");
+  assert.equal(plan.requiresForeground, true);
+});
+
+test("task planner keeps explicit strict-background audits on text bundle", () => {
+  const plan = __testing.resolvePsstGPTTaskPlan({
+    prompt: "strict background debug audit the full codebase with no popups",
+  });
+
+  assert.equal(plan.action, "audit");
+  assert.equal(plan.transport, "strict-background-text-bundle");
+  assert.equal(plan.requiresForeground, false);
+});
+
+test("task planner routes plain prompts to text relay", () => {
+  const plan = __testing.resolvePsstGPTTaskPlan({
+    prompt: "Write a short note about release risk.",
+  });
+
+  assert.equal(plan.action, "run");
+  assert.equal(plan.transport, "strict-background-text");
+});
+
+test("task prompt wrappers preserve exact-output requests", () => {
+  const uploadPrompt = __testing.buildUploadTaskPrompt("reply exactly: MARKER");
+  const textPrompt = __testing.buildTextAuditTaskPrompt("reply exactly: MARKER");
+
+  assert.match(uploadPrompt, /If the user asks for an exact output string or format/);
+  assert.match(uploadPrompt, /User request: reply exactly: MARKER/);
+  assert.match(textPrompt, /If the user asks for an exact output string or format/);
+  assert.match(textPrompt, /User request: reply exactly: MARKER/);
+});
+
 test("final delivery includes app session id", () => {
   assert.equal(
     __testing.formatAppFinalDeliveryText({
@@ -134,4 +176,127 @@ test("messagesForAppRelay appends assistant text once", () => {
 
   const unchanged = __testing.messagesForAppRelay("Prompt", "Answer", messages);
   assert.deepEqual(unchanged, messages);
+});
+
+test("parseDirectAxHelperJson accepts pretty helper payloads", () => {
+  const payload = {
+    ok: false,
+    code: "PSST_GPT_DIRECT_AX_FAILED",
+    message: "Missing JSON input argument",
+  };
+  const pretty = JSON.stringify(payload, null, 2);
+
+  assert.deepEqual(__testing.parseDirectAxHelperJson(pretty), payload);
+  assert.deepEqual(__testing.parseDirectAxHelperJson(`warning: ignored\n${pretty}`), payload);
+  assert.equal(__testing.parseDirectAxHelperJson("not json"), null);
+});
+
+test("send button detection handles long scrollable composer geometry", () => {
+  const longComposer = {
+    position: { x: 772, y: 345 },
+    size: { width: 666, height: 10200 },
+  };
+  const sendButton = {
+    description: "button",
+    position: { x: 1421, y: 555 },
+    size: { width: 32, height: 37 },
+  };
+  const shareButton = {
+    description: "Share",
+    position: { x: 1367, y: 109 },
+    size: { width: 50, height: 52 },
+  };
+  const leftComposerButton = {
+    description: "button",
+    position: { x: 901, y: 562 },
+    size: { width: 53, height: 24 },
+  };
+
+  assert.equal(__testing.visibleComposerBottomY(longComposer), 705);
+  assert.equal(__testing.isPossibleSendButtonRecord(sendButton, longComposer), true);
+  assert.equal(__testing.isPossibleSendButtonRecord(shareButton, longComposer), false);
+  assert.equal(__testing.isPossibleSendButtonRecord(leftComposerButton, longComposer), false);
+});
+
+test("send button detection still handles normal empty composer geometry", () => {
+  const emptyComposer = {
+    position: { x: 772, y: 528 },
+    size: { width: 666, height: 17 },
+  };
+  const sendButton = {
+    description: "button",
+    position: { x: 1421, y: 555 },
+    size: { width: 32, height: 37 },
+  };
+
+  assert.equal(__testing.visibleComposerBottomY(emptyComposer), 545);
+  assert.equal(__testing.isPossibleSendButtonRecord(sendButton, emptyComposer), true);
+});
+
+test("chunkTextByLines preserves text content across chunks", () => {
+  const text = ["alpha", "beta", "gamma", "delta"].join("\n");
+  const chunks = __testing.chunkTextByLines(text, 12);
+
+  assert.deepEqual(chunks, ["alpha\nbeta", "gamma\ndelta"]);
+  assert.equal(chunks.join("\n"), text);
+});
+
+test("createPsstGPTAuditBundle writes line-numbered markdown and skips excluded files", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-test-"));
+  try {
+    await writeFile(path.join(root, "README.md"), "# Demo\n", "utf8");
+    await writeFile(path.join(root, "main.mjs"), "console.log('marker');\n", "utf8");
+    await writeFile(path.join(root, "image.png"), "not really an image\n", "utf8");
+
+    const bundle = await createPsstGPTAuditBundle({
+      root,
+      maxFileBytes: 1024,
+      maxTotalBytes: 4096,
+    });
+    const markdown = await readFile(bundle.markdownPath, "utf8");
+
+    assert.equal(bundle.root, root);
+    assert.deepEqual(bundle.files.map((file) => file.path).sort(), ["README.md", "main.mjs"].sort());
+    assert.match(markdown, /### README\.md/);
+    assert.match(markdown, /    1: # Demo/);
+    assert.match(markdown, /### main\.mjs/);
+    assert.match(markdown, /    1: console\.log\('marker'\);/);
+    assert.equal(bundle.skipped.some((entry) => entry.path === "image.png"), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createPsstGPTUploadBundle writes zip shards and a manifest", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-test-"));
+  try {
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
+    await writeFile(path.join(root, "src", "a.js"), `${"a".repeat(900)}\n`, "utf8");
+    await writeFile(path.join(root, "src", "b.js"), `${"b".repeat(900)}\n`, "utf8");
+    await writeFile(path.join(root, "README.md"), "# Demo\n", "utf8");
+    await writeFile(path.join(root, "node_modules", "pkg", "index.js"), "ignored\n", "utf8");
+
+    const bundle = await createPsstGPTUploadBundle({
+      root,
+      shardBytes: 1024,
+      maxSingleFileBytes: 1024,
+    });
+    const manifest = JSON.parse(await readFile(bundle.manifestPath, "utf8"));
+
+    assert.equal(bundle.root, root);
+    assert.equal(manifest.includedFileCount, 3);
+    assert.equal(bundle.files.some((file) => file.path === "src/a.js"), true);
+    assert.equal(bundle.files.some((file) => file.path === "src/b.js"), true);
+    assert.equal(bundle.files.some((file) => file.path === "README.md"), true);
+    assert.equal(bundle.skipped.some((entry) => entry.path === "node_modules"), true);
+    assert.equal(bundle.shards.length >= 2, true);
+    for (const shard of bundle.shards) {
+      const shardStat = await stat(shard.path);
+      assert.equal(shardStat.isFile(), true);
+      assert.equal(shardStat.size > 0, true);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });

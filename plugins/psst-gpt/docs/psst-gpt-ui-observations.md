@@ -21,10 +21,14 @@ PsstGPT is an independent desktop-app implementation, inspired by the original C
 - The composer row exposes the current model as an `AXButton` value, for example `5.5 Pro`.
 - Assistant and user visible transcript text is exposed through `AXStaticText` entries above the composer.
 - Background send was verified using `AXTextArea.value` plus `AXPress` on the ChatGPT app controls while another app remained frontmost.
+- Direct Swift Accessibility can read the ChatGPT window even when `System Events` cannot inspect ChatGPT windows.
+- Foreground upload was verified through the app's Attach menu, native file picker path entry, and visible response polling.
 
 ## Verified Smoke
 
 The prompt `Reply exactly: OK PsstGPT smoke 2026-06-26` was sent through the app and the visible response included `OK PsstGPT smoke 2026-06-26`.
+
+The live upload harness on 2026-06-27 created a tiny marker project, uploaded `upload-manifest.json` plus `source-shard-001-of-001.zip`, and verified the visible response contained the generated `PSST_HARNESS_UPLOAD_OK_*` marker.
 
 ## Boundaries
 

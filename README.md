@@ -1,8 +1,8 @@
 # PsstGPT Codex Plugin
 
-PsstGPT lets Codex send a prompt to the macOS ChatGPT desktop app in strict background mode, then bring the ChatGPT response back to Codex.
+PsstGPT lets Codex send prompts to the macOS ChatGPT desktop app, bring the visible ChatGPT response back to Codex, and optionally automate source-archive uploads for large codebase audits.
 
-It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT web internals. It uses macOS Accessibility against an already-open `ChatGPT.app` window.
+It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT web internals. It uses macOS Accessibility and the ChatGPT macOS app's own UI.
 
 > This is an independent community plugin. It is not an official OpenAI or ChatGPT product.
 >
@@ -70,9 +70,9 @@ $psst-gpt Your task here
 - ChatGPT desktop app installed in `/Applications` or `~/Applications`.
 - ChatGPT app signed in and ready to use.
 - One ChatGPT app window already open somewhere on the desktop.
-- macOS Accessibility permission enabled for the process running Codex and `/usr/bin/osascript`.
+- macOS Accessibility permission enabled for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them.
 
-PsstGPT will not open, recover, or foreground a missing ChatGPT window. If there is no app window, it fails with `PSST_GPT_WINDOW_MISSING_BACKGROUND` instead of interrupting your work.
+The standard text relay will not open, recover, or foreground a missing ChatGPT window. If there is no app window, it fails with `PSST_GPT_WINDOW_MISSING_BACKGROUND` instead of interrupting your work. The upload workflow may foreground an existing ChatGPT window while it drives the native file picker.
 
 ## Cross-Platform Status
 
@@ -82,7 +82,7 @@ The idea can be made cross-platform, but not by reusing the current macOS automa
 
 | Platform | Status | What would be needed |
 | --- | --- | --- |
-| macOS | Implemented and live-tested | Current backend: `open -g`, `/usr/bin/osascript`, JavaScript for Automation, and macOS Accessibility. |
+| macOS | Implemented and live-tested | Current backend: `open -g`, `/usr/bin/osascript`/JXA for strict-background text relay, `/usr/bin/swift` direct Accessibility for foreground uploads, and macOS Accessibility. |
 | Windows | Feasible, not implemented | A separate Windows backend using the ChatGPT Windows app plus Windows UI Automation. It must be tested for strict no-focus/no-popup behavior before release. |
 | Linux | Not currently targeted | OpenAI's current desktop download page lists macOS and Windows desktop apps, not a Linux ChatGPT desktop app. |
 
@@ -100,7 +100,7 @@ When you invoke PsstGPT:
 6. It waits for the visible assistant response to stabilize.
 7. It returns `finalDeliveryText` to Codex.
 
-The ChatGPT app is not activated or brought to the foreground during the verified flow.
+The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI.
 
 ## Example Prompts
 
@@ -122,7 +122,7 @@ From the repository root:
 
 ```bash
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
-  '{"command":"run","prompt":"Reply exactly: OK from PsstGPT","background":true}'
+  '{"command":"task","prompt":"Reply exactly: OK from PsstGPT"}'
 ```
 
 For long tasks, start first and poll later:
@@ -136,6 +136,38 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"poll","query":"migration plan","background":true}'
 ```
+
+Create a source upload bundle without sending it:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"upload-bundle","root":"/absolute/path/to/project"}'
+```
+
+Run the automatic task router for a foreground upload audit:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"task","prompt":"debug audit the full codebase","root":"/absolute/path/to/project"}'
+```
+
+The upload audit workflow writes the returned visible response to `chatgpt-audit-response.md` and the structured result to `chatgpt-audit-result.json` inside the generated upload bundle directory.
+
+Inspect routing without sending:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"plan","prompt":"debug audit the full codebase","root":"/absolute/path/to/project"}'
+```
+
+Run the live harness:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"harness","timeoutMs":300000}'
+```
+
+The harness creates a tiny marker project, routes through the same `task` planner, uploads the generated zip bundle through the ChatGPT macOS app, verifies ChatGPT returned the marker from the uploaded files, and verifies the local response/result files were written.
 
 ## Troubleshooting
 
@@ -176,11 +208,13 @@ Open a ChatGPT app window manually, leave it open, then rerun PsstGPT. The relay
 
 ### Accessibility Fails
 
-Enable Accessibility for the process running Codex and for `/usr/bin/osascript` if macOS prompts for it.
+Enable Accessibility for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them. Text relay uses JXA/osascript; upload relay uses the direct Swift Accessibility helper.
 
 ### Unsupported Option
 
-PsstGPT currently supports verified text prompt relay through the active ChatGPT app only. Model selection, file upload, Projects, GPT Apps, Create image artifact export, and Deep Research Markdown export fail explicitly with `PSST_GPT_UNSUPPORTED_OPTION`.
+PsstGPT supports verified strict-background text prompt relay through the active ChatGPT app. Model selection, Projects, GPT Apps, Create image artifact export, and Deep Research Markdown export fail explicitly with `PSST_GPT_UNSUPPORTED_OPTION`.
+
+For file upload, use the explicit foreground automatic `upload-audit` workflow. Regular `run`/`start` still reject attachment options so strict-background behavior is not accidentally weakened.
 
 ## Local Development
 
@@ -188,6 +222,7 @@ Run the checks:
 
 ```bash
 node --check plugins/psst-gpt/scripts/psst_gpt.mjs
+/usr/bin/swiftc -parse plugins/psst-gpt/scripts/psst_ax_upload.swift
 node --test plugins/psst-gpt/scripts/psst_gpt.test.mjs
 ```
 
@@ -206,6 +241,8 @@ Runtime dependencies are:
 - Node built-ins.
 - `/usr/bin/open -g`.
 - `/usr/bin/osascript`.
+- `/usr/bin/swift`.
+- `/usr/bin/zip` for source upload bundles.
 - macOS Accessibility.
 - `ChatGPT.app` bundle id `com.openai.chat`.
 
@@ -214,6 +251,7 @@ Runtime dependencies are:
 - macOS only.
 - Requires a signed-in ChatGPT desktop app.
 - Requires an already-open ChatGPT app window.
-- Strict background mode only.
+- Strict background mode for text relay.
+- Foreground automatic mode for source upload audits.
 - No Chrome, browser extension, browser session, cookies, local storage, screenshots, or OCR.
 - No model picker automation until the app UI path is verified end to end without interruption.

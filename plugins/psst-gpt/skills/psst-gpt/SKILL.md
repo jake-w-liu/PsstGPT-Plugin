@@ -10,7 +10,12 @@ It is separate from Chrome-backed GPT Relay and does not use the Codex Chrome ex
 
 Credit: PsstGPT is an independent desktop-app implementation, inspired by the original Chrome-backed GPT Relay by Prompt Case. Thanks to him for the relay concept and Codex plugin workflow.
 
-When the user invokes `$psst-gpt` or selects `psst-gpt` from the slash command list, treat the remaining user text as the prompt to relay to the ChatGPT app.
+When the user invokes `$psst-gpt` or selects `psst-gpt` from the slash command list, pass the remaining user text to `runPsstGPTTask`. The helper routes the task internally.
+
+Do not manually choose a transport in Codex. `runPsstGPTTask` decides:
+
+- Automatic full-file upload: requests that say or imply full codebase, full repo, all files, full upload, zip, upload, large codebase, or no truncation route to `uploadAuditPsstGPT`. A prompt such as `$psst-gpt debug audit the full codebase` routes to this path. It packages the source tree into zip shards plus an upload manifest, uses the direct Swift Accessibility helper to drive the native file picker, sends the audit request, then writes the returned visible response to local Markdown/JSON files.
+- Strict background/no popups: requests that explicitly ask for strict background/no popups, or are clearly lightweight text-only audits, route to `auditPsstGPT`. It builds a line-numbered Markdown audit bundle from local text files, sends it to the ChatGPT app as strict-background text chunks, then sends the final audit request.
 
 ## What It Does
 
@@ -31,7 +36,7 @@ Use the helper script at `../../scripts/psst_gpt.mjs` to:
 - ChatGPT desktop app installed in `/Applications` or `~/Applications`.
 - A ChatGPT app window is already open. The helper will not open, recover, or foreground a missing window.
 - User is already signed in to the ChatGPT app.
-- macOS Accessibility automation is enabled for the process running Codex and `/usr/bin/osascript`.
+- macOS Accessibility automation is enabled for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them.
 
 Do not inspect cookies, local storage, passwords, app databases, browser session stores, or hidden ChatGPT state.
 
@@ -39,9 +44,12 @@ Do not inspect cookies, local storage, passwords, app databases, browser session
 
 - Only send prompts that the user explicitly asks to relay to the ChatGPT app.
 - PsstGPT supports text prompts in the active ChatGPT app surface.
-- The relay is strict-background only. Do not pass `background: false`; do not request window recovery.
+- For codebase audits, PsstGPT supports strict-background text-bundle relay through `auditPsstGPT`.
+- The standard text relay is strict-background only. Do not pass `background: false`; do not request window recovery.
+- File upload relay is foreground automatic, not strict background. Use it only when the user explicitly asks for full upload or accepts foreground automation.
 - If the helper returns `PSST_GPT_WINDOW_MISSING_BACKGROUND`, ask the user to manually open a ChatGPT app window when convenient. Do not auto-click Dock, use screenshots, or foreground the app.
-- Model selection, reasoning mode selection, file attachments, Projects, GPT Apps, Create image artifact export, and Deep Research Markdown export are not implemented until verified through the app UI. If requested, report `PSST_GPT_UNSUPPORTED_OPTION`.
+- Model selection, reasoning mode selection, Projects, GPT Apps, Create image artifact export, and Deep Research Markdown export are not implemented in strict background mode. If requested, report `PSST_GPT_UNSUPPORTED_OPTION`.
+- Do not use macOS file upload dialogs, clipboard file paste, Finder automation, screenshots, or foreground activation for strict-background PsstGPT. The dedicated `uploadAuditPsstGPT` path may use the native file picker and a temporary, restored clipboard path paste because that mode is explicitly foreground automatic.
 - If the app shows login, CAPTCHA, verification, permission, or account prompts, stop and report the helper error.
 - If the app is still answering, keep waiting or poll the same session. Do not answer the user's task locally as a substitute.
 - The helper reports only visible app UI state. Do not claim hidden backend model state.
@@ -58,10 +66,61 @@ Use an absolute import path resolved from this skill file:
 Start a new app chat:
 
 ```js
-const { runPsstGPT } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
-const result = await runPsstGPT({
+const { runPsstGPTTask } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+const result = await runPsstGPTTask({
   prompt: "User prompt here",
+  root: process.cwd(),
+  timeoutMs: 30 * 60 * 1000
+});
+nodeRepl.write(result.finalDeliveryText);
+```
+
+Inspect the route without sending:
+
+```js
+const { planPsstGPTTask } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+nodeRepl.write(JSON.stringify(planPsstGPTTask({
+  prompt: "debug audit the full codebase",
+  root: process.cwd()
+}), null, 2));
+```
+
+Run the live upload harness:
+
+```js
+const { harnessPsstGPT } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+nodeRepl.write(JSON.stringify(await harnessPsstGPT({
+  timeoutMs: 5 * 60 * 1000
+}), null, 2));
+```
+
+Audit the current codebase in strict background mode:
+
+```js
+const { auditPsstGPT } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+const result = await auditPsstGPT({
+  root: process.cwd(),
   background: true,
+  timeoutMs: 30 * 60 * 1000
+});
+nodeRepl.write(result.finalDeliveryText);
+```
+
+Create an audit bundle without sending it:
+
+```js
+const { createPsstGPTAuditBundle } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+nodeRepl.write(JSON.stringify(await createPsstGPTAuditBundle({
+  root: process.cwd()
+}), null, 2));
+```
+
+Audit the current codebase with automatic file upload:
+
+```js
+const { uploadAuditPsstGPT } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+const result = await uploadAuditPsstGPT({
+  root: process.cwd(),
   timeoutMs: 30 * 60 * 1000
 });
 nodeRepl.write(result.finalDeliveryText);

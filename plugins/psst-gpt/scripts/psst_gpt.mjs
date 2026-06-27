@@ -37,6 +37,8 @@ const DEFAULT_UPLOAD_SHARD_BYTES = 20 * 1024 * 1024;
 const DEFAULT_UPLOAD_MAX_ATTACHMENTS_PER_MESSAGE = 5;
 const DEFAULT_UPLOAD_MAX_SINGLE_FILE_BYTES = DEFAULT_UPLOAD_SHARD_BYTES;
 const DEFAULT_HARNESS_TIMEOUT_MS = 5 * 60 * 1000;
+const UPLOAD_VERIFICATION_OK_PREFIX = "PsstGPT upload verification: OK";
+const UPLOAD_VERIFICATION_FAIL_PREFIX = "PsstGPT upload verification: FAILED";
 const AUDIT_TEXT_EXTENSIONS = new Set([
   ".c",
   ".cc",
@@ -421,6 +423,28 @@ function buildTextAuditTaskPrompt(userPrompt) {
   ].join("\n");
 }
 
+function buildUploadVerificationInstruction(filePaths = []) {
+  const fileNames = dedupe(filePaths.map((filePath) => path.basename(filePath))).filter(Boolean);
+  const fileList = fileNames.length > 0 ? fileNames.join(", ") : "the uploaded source archive";
+  return [
+    `On the first line, write exactly "${UPLOAD_VERIFICATION_OK_PREFIX} ${fileList}" only if you successfully inspected ${fileList}.`,
+    `Otherwise, write exactly "${UPLOAD_VERIFICATION_FAIL_PREFIX} <reason>" on the first line.`,
+  ].join(" ");
+}
+
+function buildVerifiedUploadAuditPrompt(prompt, filePaths = []) {
+  const trimmedPrompt = String(prompt ?? "").trim();
+  if (!trimmedPrompt || isExactOutputRequest(trimmedPrompt)) {
+    return trimmedPrompt;
+  }
+  return [
+    buildUploadVerificationInstruction(filePaths),
+    "After that first verification line, provide the full requested answer.",
+    "",
+    trimmedPrompt,
+  ].join("\n");
+}
+
 async function makeHarnessProject(marker) {
   const root = await mkdir(path.join(os.tmpdir(), "psst-gpt-harness"), { recursive: true })
     .then(() => path.join(os.tmpdir(), "psst-gpt-harness", `project-${Date.now()}`));
@@ -617,11 +641,6 @@ export async function createPsstGPTUploadBundle(options = {}) {
     shards: [archive],
     archives: [archive],
   };
-  await writeFile(
-    path.join(bundleDir, "upload-bundle.json"),
-    `${JSON.stringify(result, null, 2)}\n`,
-    "utf8"
-  );
   return result;
 }
 
@@ -655,6 +674,7 @@ export async function uploadAuditPsstGPT(options = {}) {
   const attachmentPaths = bundle.attachmentPaths?.length
     ? bundle.attachmentPaths
     : [bundle.archivePath, ...bundle.shards.map((shard) => shard.path)].filter(Boolean);
+  const verifiedFinalPrompt = buildVerifiedUploadAuditPrompt(finalPrompt, attachmentPaths);
   const groups = chunkArray(
     attachmentPaths,
     Math.max(1, Number(maxAttachmentsPerMessage) || DEFAULT_UPLOAD_MAX_ATTACHMENTS_PER_MESSAGE)
@@ -663,7 +683,7 @@ export async function uploadAuditPsstGPT(options = {}) {
   if (groups.length === 1) {
     const result = await relayPromptWithFileUploads({
       prompt: [
-        finalPrompt,
+        verifiedFinalPrompt,
         "",
         `PsstGPT upload bundle: ${bundle.bundleId}`,
         `Attached files: ${attachmentPaths.map((filePath) => path.basename(filePath)).join(", ")}`,
@@ -679,7 +699,7 @@ export async function uploadAuditPsstGPT(options = {}) {
     });
     const substantiveResult = await ensureSubstantiveAuditResult({
       result,
-      requestedPrompt: finalPrompt,
+      requestedPrompt: verifiedFinalPrompt,
       bundleId: bundle.bundleId,
       retryLimit: options.auditAckRetryLimit,
       relayOptions: {
@@ -691,7 +711,14 @@ export async function uploadAuditPsstGPT(options = {}) {
         tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
       },
     });
-    return persistUploadAuditResult({ result: substantiveResult, bundle });
+    const normalizedResult = await normalizeUploadAuditResult({
+      result: substantiveResult,
+      attachmentPaths,
+      requireVerification: !isExactOutputRequest(finalPrompt),
+      statePath,
+      relaySessionId,
+    });
+    return persistUploadAuditResult({ result: normalizedResult, bundle });
   }
 
   await relayPromptWithFileUploads({
@@ -735,7 +762,7 @@ export async function uploadAuditPsstGPT(options = {}) {
     prompt: [
       "FINAL UPLOAD AUDIT REQUEST.",
       `Bundle ID: ${bundle.bundleId}`,
-      finalPrompt,
+      verifiedFinalPrompt,
       "Use only the uploaded source archive zip files already provided in this chat.",
     ].join("\n"),
     timeoutMs,
@@ -747,7 +774,7 @@ export async function uploadAuditPsstGPT(options = {}) {
   });
   const substantiveResult = await ensureSubstantiveAuditResult({
     result,
-    requestedPrompt: finalPrompt,
+    requestedPrompt: verifiedFinalPrompt,
     bundleId: bundle.bundleId,
     retryLimit: options.auditAckRetryLimit,
     relayOptions: {
@@ -759,7 +786,14 @@ export async function uploadAuditPsstGPT(options = {}) {
       tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
     },
   });
-  return persistUploadAuditResult({ result: substantiveResult, bundle });
+  const normalizedResult = await normalizeUploadAuditResult({
+    result: substantiveResult,
+    attachmentPaths,
+    requireVerification: !isExactOutputRequest(finalPrompt),
+    statePath,
+    relaySessionId,
+  });
+  return persistUploadAuditResult({ result: normalizedResult, bundle });
 }
 
 async function collectUploadFiles(root, {
@@ -1211,15 +1245,196 @@ async function validateUploadFilePaths(filePaths = []) {
 async function persistUploadAuditResult({ result, bundle }) {
   const responsePath = path.join(bundle.outputDir, "chatgpt-audit-response.md");
   const resultPath = path.join(bundle.outputDir, "chatgpt-audit-result.json");
+  const bundlePath = path.join(bundle.outputDir, "upload-bundle.json");
+  await writeFile(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
   await writeFile(responsePath, `${String(result.assistantText ?? "").trimEnd()}\n`, "utf8");
   const enriched = {
     ...result,
-    bundle,
+    bundle: {
+      ...bundle,
+      metadataPath: bundlePath,
+    },
     responsePath,
     resultPath,
   };
   await writeFile(resultPath, `${JSON.stringify(enriched, null, 2)}\n`, "utf8");
   return enriched;
+}
+
+async function normalizeUploadAuditResult({
+  result,
+  attachmentPaths,
+  requireVerification,
+  statePath,
+  relaySessionId,
+}) {
+  if (!requireVerification) {
+    return result;
+  }
+  const normalized = normalizeUploadAuditAssistantText(result?.assistantText, attachmentPaths);
+  if (relaySessionId) {
+    await replaceStoredAssistantText({
+      relaySessionId,
+      statePath,
+      assistantText: normalized.assistantText,
+    });
+  }
+  return rewriteRelayResultAssistantText(result, normalized.assistantText, {
+    uploadVerification: normalized.verification,
+  });
+}
+
+function normalizeUploadAuditAssistantText(assistantText, attachmentPaths = []) {
+  const verification = parseUploadVerificationHeader(assistantText, attachmentPaths);
+  if (!verification.ok) {
+    throw codedError(
+      "PSST_GPT_UPLOAD_NOT_VERIFIED",
+      verification.message,
+      {
+        assistantText,
+        verification,
+      }
+    );
+  }
+  const normalizedAssistantText = normalizeAssistantText(verification.bodyText);
+  if (!normalizedAssistantText) {
+    throw codedError(
+      "PSST_GPT_UPLOAD_NOT_VERIFIED",
+      "ChatGPT reported that it inspected the uploaded archive, but the audit body was empty.",
+      {
+        assistantText,
+        verification,
+      }
+    );
+  }
+  return {
+    assistantText: normalizedAssistantText,
+    verification,
+  };
+}
+
+function parseUploadVerificationHeader(assistantText, attachmentPaths = []) {
+  const text = String(assistantText ?? "").replace(/\r/g, "").trim();
+  const expectedFiles = dedupe(attachmentPaths.map((filePath) => path.basename(filePath))).filter(Boolean);
+  if (!text) {
+    return {
+      ok: false,
+      verified: false,
+      header: "",
+      bodyText: "",
+      expectedFiles,
+      message: "ChatGPT returned an empty response after the upload audit.",
+    };
+  }
+  const [firstLineRaw, ...bodyLines] = text.split("\n");
+  const firstLine = firstLineRaw.trim();
+  if (firstLine.startsWith(UPLOAD_VERIFICATION_FAIL_PREFIX)) {
+    const reason = firstLine.slice(UPLOAD_VERIFICATION_FAIL_PREFIX.length).trim();
+    return {
+      ok: false,
+      verified: false,
+      header: firstLine,
+      bodyText: bodyLines.join("\n"),
+      expectedFiles,
+      message: reason
+        ? `ChatGPT reported that it could not inspect the uploaded archive: ${reason}`
+        : "ChatGPT reported that it could not inspect the uploaded archive.",
+    };
+  }
+  if (!firstLine.startsWith(`${UPLOAD_VERIFICATION_OK_PREFIX} `)) {
+    return {
+      ok: false,
+      verified: false,
+      header: firstLine,
+      bodyText: bodyLines.join("\n"),
+      expectedFiles,
+      message:
+        "The upload audit response did not include the required upload verification header, so PsstGPT cannot prove that ChatGPT inspected the uploaded archive.",
+    };
+  }
+  const verifiedFiles = dedupe(
+    firstLine
+      .slice(UPLOAD_VERIFICATION_OK_PREFIX.length)
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  );
+  if (expectedFiles.length > 0 && expectedFiles.some((fileName) => !verifiedFiles.includes(fileName))) {
+    return {
+      ok: false,
+      verified: false,
+      header: firstLine,
+      bodyText: bodyLines.join("\n"),
+      expectedFiles,
+      verifiedFiles,
+      message:
+        "The upload audit response did not confirm inspection of every uploaded archive file that PsstGPT attached.",
+    };
+  }
+  return {
+    ok: true,
+    verified: true,
+    header: firstLine,
+    bodyText: bodyLines.join("\n").trimStart(),
+    expectedFiles,
+    verifiedFiles,
+  };
+}
+
+async function replaceStoredAssistantText({ relaySessionId, statePath, assistantText }) {
+  const store = await loadAppSessionStore(statePath);
+  const index = store.sessions.findIndex((session) => session?.relaySessionId === relaySessionId);
+  if (index < 0) {
+    return;
+  }
+  const session = store.sessions[index];
+  const messages = Array.isArray(session.messages)
+    ? session.messages.map((message) => ({ ...message }))
+    : [];
+  const lastAssistantIndex = [...messages]
+    .reverse()
+    .findIndex((message) => message?.role === "assistant");
+  if (lastAssistantIndex < 0) {
+    messages.push({
+      index: messages.length,
+      role: "assistant",
+      text: assistantText,
+    });
+  } else {
+    const indexFromStart = messages.length - 1 - lastAssistantIndex;
+    messages[indexFromStart] = {
+      ...messages[indexFromStart],
+      text: assistantText,
+    };
+  }
+  store.sessions[index] = {
+    ...session,
+    messages,
+    summary: summarizeMessages(messages),
+    keywords: extractKeywords(messages),
+    updatedAt: new Date().toISOString(),
+  };
+  await saveAppSessionStore(statePath, store);
+}
+
+function rewriteRelayResultAssistantText(result, assistantText, extra = {}) {
+  const relaySessionId = result?.session?.relaySessionId || "";
+  const finalDeliveryText = formatAppFinalDeliveryText({
+    assistantText,
+    relaySessionId,
+  });
+  const mustReturnFinalDelivery =
+    result?.status === "complete" &&
+    finalDeliveryText.trim().length > 0;
+  return {
+    ...result,
+    ...extra,
+    assistantText,
+    finalDeliveryText,
+    finalResponseText: finalDeliveryText,
+    mustReturnFinalDelivery,
+    mustReturnVerbatim: mustReturnFinalDelivery,
+  };
 }
 
 async function collectAuditFiles(root, { maxFileBytes, maxTotalBytes }) {
@@ -1814,7 +2029,7 @@ async function waitForAppAssistantResponse({
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   const start = Date.now();
   let lastState = null;
-  let lastAssistantText = "";
+  let captureState = createAssistantCaptureState();
   let lastChangedAt = Date.now();
 
   while (normalizedTimeoutMs === 0 || Date.now() - start < normalizedTimeoutMs) {
@@ -1827,20 +2042,40 @@ async function waitForAppAssistantResponse({
     assertNoFatalAppBlocker(state);
     lastState = state;
 
-    const assistantText = extractAssistantTextFromAppState(state, prompt);
-    if (assistantText !== lastAssistantText) {
-      lastAssistantText = assistantText;
+    const nextCaptureState = advanceAssistantCaptureState(
+      captureState,
+      extractAssistantCaptureSnapshot(state, prompt)
+    );
+    if (didAssistantCaptureStateChange(captureState, nextCaptureState)) {
       lastChangedAt = Date.now();
+    }
+    captureState = nextCaptureState;
+
+    if (
+      captureState.incomplete &&
+      !state.isAnswering &&
+      Date.now() - lastChangedAt >= RESPONSE_STABLE_MS
+    ) {
+      throw codedError(
+        "PSST_GPT_RESPONSE_CAPTURE_INCOMPLETE",
+        captureState.incompleteReason ||
+          "PsstGPT could not verify that it captured the full assistant response from the ChatGPT app.",
+        {
+          captureState,
+          lastState: state,
+        }
+      );
     }
 
     if (isAppResponseCompleteSnapshot({
-      assistantText: lastAssistantText,
+      assistantText: captureState.assistantText,
       textStableForMs: Date.now() - lastChangedAt,
       isAnswering: state.isAnswering,
+      captureState,
     })) {
       return {
         status: "complete",
-        assistantText: lastAssistantText,
+        assistantText: captureState.assistantText,
         state,
       };
     }
@@ -1849,7 +2084,7 @@ async function waitForAppAssistantResponse({
   if (allowPending) {
     return {
       status: "pending",
-      assistantText: lastAssistantText,
+      assistantText: captureState.assistantText,
       state: lastState,
     };
   }
@@ -1861,16 +2096,21 @@ async function waitForAppAssistantResponse({
   );
 }
 
-function isAppResponseCompleteSnapshot({ assistantText, textStableForMs, isAnswering }) {
+function isAppResponseCompleteSnapshot({ assistantText, textStableForMs, isAnswering, captureState }) {
   return Boolean(
     assistantText?.trim() &&
     !isAppTransientText(assistantText) &&
     textStableForMs >= RESPONSE_STABLE_MS &&
-    !isAnswering
+    !isAnswering &&
+    assistantCaptureCanComplete(captureState)
   );
 }
 
 function extractAssistantTextFromAppState(state = {}, prompt = "") {
+  return extractAssistantCaptureSnapshot(state, prompt).assistantText;
+}
+
+function extractAssistantCaptureSnapshot(state = {}, prompt = "") {
   const promptNeedle = normalizeForMatch(prompt);
   const transcript = Array.isArray(state.transcriptTexts)
     ? state.transcriptTexts
@@ -1899,7 +2139,139 @@ function extractAssistantTextFromAppState(state = {}, prompt = "") {
     .filter((text) => normalizeForMatch(text) !== promptNeedle)
     .filter((text) => !isAppTransientText(text));
 
-  return normalizeAssistantText(dedupeAdjacent(candidates).join("\n"));
+  return {
+    promptVisible: promptIndex >= 0,
+    assistantText: normalizeAssistantText(dedupeAdjacent(candidates).join("\n")),
+  };
+}
+
+function createAssistantCaptureState() {
+  return {
+    assistantText: "",
+    promptVisibleEver: false,
+    promptVisibleNow: false,
+    incomplete: false,
+    incompleteReason: "",
+    lastVisibleAssistantText: "",
+  };
+}
+
+function advanceAssistantCaptureState(currentState = createAssistantCaptureState(), snapshot = {}) {
+  const nextState = {
+    ...createAssistantCaptureState(),
+    ...currentState,
+  };
+  const promptVisible = snapshot.promptVisible === true;
+  const visibleAssistantText = normalizeAssistantText(snapshot.assistantText);
+  nextState.promptVisibleNow = promptVisible;
+  if (visibleAssistantText) {
+    nextState.lastVisibleAssistantText = visibleAssistantText;
+  }
+
+  if (promptVisible) {
+    nextState.promptVisibleEver = true;
+  }
+  if (!visibleAssistantText) {
+    return nextState;
+  }
+
+  if (promptVisible) {
+    if (
+      !nextState.assistantText ||
+      visibleAssistantText.length >= nextState.assistantText.length ||
+      visibleAssistantText.includes(nextState.assistantText)
+    ) {
+      nextState.assistantText = visibleAssistantText;
+    } else if (!nextState.assistantText.includes(visibleAssistantText)) {
+      nextState.assistantText = visibleAssistantText;
+    }
+    nextState.incomplete = false;
+    nextState.incompleteReason = "";
+    return nextState;
+  }
+
+  if (!nextState.assistantText) {
+    nextState.incomplete = true;
+    nextState.incompleteReason =
+      "The active prompt scrolled out of the visible ChatGPT transcript before any assistant text was captured.";
+    return nextState;
+  }
+
+  const merged = mergeAssistantTails(nextState.assistantText, visibleAssistantText);
+  if (merged.ok) {
+    nextState.assistantText = merged.text;
+    nextState.incomplete = false;
+    nextState.incompleteReason = "";
+    return nextState;
+  }
+
+  nextState.incomplete = true;
+  nextState.incompleteReason =
+    "The assistant response grew beyond the visible ChatGPT transcript and the newly visible tail could not be aligned with the previously captured text.";
+  return nextState;
+}
+
+function mergeAssistantTails(previousText = "", currentVisibleText = "") {
+  const previous = normalizeAssistantText(previousText);
+  const current = normalizeAssistantText(currentVisibleText);
+  if (!current) {
+    return { ok: true, text: previous, strategy: "empty-current" };
+  }
+  if (!previous) {
+    return { ok: false, reason: "no-prior-capture" };
+  }
+  if (current === previous || previous.endsWith(current) || previous.includes(current)) {
+    return { ok: true, text: previous, strategy: "current-within-previous" };
+  }
+  if (current.includes(previous)) {
+    return { ok: true, text: current, strategy: "previous-within-current" };
+  }
+  const maxOverlap = Math.min(previous.length, current.length);
+  const minOverlap = minimumAssistantTailOverlap(previous, current);
+  for (let length = maxOverlap; length >= minOverlap; length -= 1) {
+    if (previous.slice(-length) === current.slice(0, length)) {
+      return {
+        ok: true,
+        text: normalizeAssistantText(previous + current.slice(length)),
+        strategy: "suffix-prefix-overlap",
+        overlapLength: length,
+      };
+    }
+  }
+  return {
+    ok: false,
+    reason: "tail-could-not-be-aligned",
+  };
+}
+
+function minimumAssistantTailOverlap(previousText = "", currentText = "") {
+  const shortest = Math.min(previousText.length, currentText.length);
+  if (shortest <= 24) {
+    return shortest;
+  }
+  if (shortest <= 80) {
+    return Math.max(12, Math.floor(shortest / 2));
+  }
+  return Math.max(24, Math.floor(shortest * 0.2));
+}
+
+function assistantCaptureCanComplete(captureState = {}) {
+  if (!captureState || Object.keys(captureState).length === 0) {
+    return true;
+  }
+  return Boolean(
+    captureState?.assistantText?.trim() &&
+    captureState?.promptVisibleEver &&
+    !captureState?.incomplete
+  );
+}
+
+function didAssistantCaptureStateChange(previousState = {}, nextState = {}) {
+  return previousState.assistantText !== nextState.assistantText ||
+    previousState.promptVisibleEver !== nextState.promptVisibleEver ||
+    previousState.promptVisibleNow !== nextState.promptVisibleNow ||
+    previousState.incomplete !== nextState.incomplete ||
+    previousState.incompleteReason !== nextState.incompleteReason;
 }
 
 function transcriptContainsPrompt(state = {}, prompt = "") {
@@ -2792,9 +3164,9 @@ function buttonLabel(record) {
 }
 
 function staticTextForRecord(record) {
-  var description = normalizeText(record.description);
-  var value = normalizeText(record.value);
-  var name = normalizeText(record.name);
+  var description = normalizeTranscriptText(record.description);
+  var value = normalizeTranscriptText(record.value);
+  var name = normalizeTranscriptText(record.name);
   if (description && description.toLowerCase() !== "text") {
     return description;
   }
@@ -2905,6 +3277,16 @@ function safeString(callback) {
 
 function normalizeText(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeTranscriptText(value) {
+  return String(value || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(function(line) { return line.replace(/[ \t]+$/g, ""); })
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function fail(code, message, details) {
@@ -3236,6 +3618,10 @@ if (executedPath === fileURLToPath(import.meta.url)) {
 
 export const __testing = {
   extractAssistantTextFromAppState,
+  extractAssistantCaptureSnapshot,
+  createAssistantCaptureState,
+  advanceAssistantCaptureState,
+  mergeAssistantTails,
   transcriptContainsPrompt,
   isAppResponseCompleteSnapshot,
   isAppTransientText,
@@ -3262,4 +3648,6 @@ export const __testing = {
   buildAccessibilityReminderMessage,
   isAccessibilityError,
   shouldShowAccessibilityReminder,
+  buildVerifiedUploadAuditPrompt,
+  parseUploadVerificationHeader,
 };

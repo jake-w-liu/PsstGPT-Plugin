@@ -21,6 +21,20 @@ struct NodeRecord {
     let size: CGSize?
 }
 
+struct AssistantCaptureSnapshot {
+    let promptVisible: Bool
+    let assistantText: String
+}
+
+struct AssistantCaptureState {
+    var assistantText = ""
+    var promptVisibleEver = false
+    var promptVisibleNow = false
+    var incomplete = false
+    var incompleteReason = ""
+    var lastVisibleAssistantText = ""
+}
+
 enum AxUploadError: Error, CustomStringConvertible {
     case message(String)
 
@@ -119,6 +133,17 @@ func label(_ element: AXUIElement) -> String {
         stringAttr(element, kAXTitleAttribute),
         stringAttr(element, kAXValueAttribute),
     ].filter { !$0.isEmpty }.joined(separator: " "))
+}
+
+func transcriptText(_ element: AXUIElement) -> String {
+    let values = [
+        stringAttr(element, kAXDescriptionAttribute),
+        stringAttr(element, kAXValueAttribute),
+        stringAttr(element, kAXTitleAttribute),
+    ].filter { !$0.isEmpty }
+    guard let first = values.first else { return "" }
+    let normalized = normalizeAssistantText(first)
+    return normalized.lowercased() == "text" ? "" : normalized
 }
 
 func record(_ element: AXUIElement) -> NodeRecord {
@@ -259,18 +284,23 @@ func composer(_ window: AXUIElement) -> NodeRecord? {
 }
 
 func snapshot(_ window: AXUIElement) -> [String: Any] {
-    let records = descendants(window).map(record)
+    let nodes = descendants(window)
+    let records = nodes.map(record)
     let composerRecord = records.first { $0.role == kAXTextAreaRole }
     let composerTop = composerRecord?.position?.y ?? CGFloat.greatestFiniteMagnitude
-    let staticTexts = records
-        .filter { $0.role == kAXStaticTextRole && !$0.label.isEmpty && (($0.position?.y ?? 0) < composerTop - 8) }
-        .sorted {
-            let ly = $0.position?.y ?? 0
-            let ry = $1.position?.y ?? 0
-            if ly != ry { return ly < ry }
-            return ($0.position?.x ?? 0) < ($1.position?.x ?? 0)
+    let staticTexts = zip(records, nodes)
+        .filter { record, node in
+            record.role == kAXStaticTextRole &&
+                !transcriptText(node).isEmpty &&
+                ((record.position?.y ?? 0) < composerTop - 8)
         }
-        .map(\.label)
+        .sorted {
+            let ly = $0.0.position?.y ?? 0
+            let ry = $1.0.position?.y ?? 0
+            if ly != ry { return ly < ry }
+            return ($0.0.position?.x ?? 0) < ($1.0.position?.x ?? 0)
+        }
+        .map { _, node in transcriptText(node) }
     let buttonLabels = records
         .filter { $0.role == kAXButtonRole && !$0.label.isEmpty }
         .map(\.label)
@@ -295,7 +325,7 @@ func snapshot(_ window: AXUIElement) -> [String: Any] {
     ]
 }
 
-func assistantText(from state: [String: Any], prompt: String) -> String {
+func assistantCaptureSnapshot(from state: [String: Any], prompt: String) -> AssistantCaptureSnapshot {
     let transcript = state["transcriptTexts"] as? [String] ?? []
     let promptNeedle = normalize(prompt).lowercased()
     var promptIndex = -1
@@ -310,10 +340,100 @@ func assistantText(from state: [String: Any], prompt: String) -> String {
     }
     let slice = promptIndex >= 0 ? transcript.dropFirst(promptIndex + 1) : transcript[...]
     let ignored = Set(["Ask anything", "Thinking", "Pro thinking", "Searching", "Searching the web"])
-    return slice
+    let assistantText = slice
         .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty && !ignored.contains($0) && normalize($0).lowercased() != promptNeedle }
         .joined(separator: "\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return AssistantCaptureSnapshot(
+        promptVisible: promptIndex >= 0,
+        assistantText: assistantText
+    )
+}
+
+func assistantText(from state: [String: Any], prompt: String) -> String {
+    assistantCaptureSnapshot(from: state, prompt: prompt).assistantText
+}
+
+func minimumAssistantTailOverlap(_ previous: String, _ current: String) -> Int {
+    let shortest = min(previous.count, current.count)
+    if shortest <= 24 { return shortest }
+    if shortest <= 80 { return max(12, shortest / 2) }
+    return max(24, Int(Double(shortest) * 0.2))
+}
+
+func mergeAssistantTails(_ previousText: String, _ currentVisibleText: String) -> String? {
+    let previous = normalizeAssistantText(previousText)
+    let current = normalizeAssistantText(currentVisibleText)
+    if current.isEmpty { return previous }
+    if previous.isEmpty { return nil }
+    if current == previous || previous.hasSuffix(current) || previous.contains(current) {
+        return previous
+    }
+    if current.contains(previous) {
+        return current
+    }
+    let minOverlap = minimumAssistantTailOverlap(previous, current)
+    let maxOverlap = min(previous.count, current.count)
+    for overlapLength in stride(from: maxOverlap, through: minOverlap, by: -1) {
+        let previousSuffix = String(previous.suffix(overlapLength))
+        let currentPrefix = String(current.prefix(overlapLength))
+        if previousSuffix == currentPrefix {
+            return normalizeAssistantText(previous + current.dropFirst(overlapLength))
+        }
+    }
+    return nil
+}
+
+func advanceAssistantCapture(_ state: AssistantCaptureState, snapshot: AssistantCaptureSnapshot) -> AssistantCaptureState {
+    var next = state
+    let visibleAssistantText = normalizeAssistantText(snapshot.assistantText)
+    next.promptVisibleNow = snapshot.promptVisible
+    if !visibleAssistantText.isEmpty {
+        next.lastVisibleAssistantText = visibleAssistantText
+    }
+    if snapshot.promptVisible {
+        next.promptVisibleEver = true
+    }
+    if visibleAssistantText.isEmpty {
+        return next
+    }
+    if snapshot.promptVisible {
+        if next.assistantText.isEmpty ||
+            visibleAssistantText.count >= next.assistantText.count ||
+            visibleAssistantText.contains(next.assistantText) ||
+            !next.assistantText.contains(visibleAssistantText) {
+            next.assistantText = visibleAssistantText
+        }
+        next.incomplete = false
+        next.incompleteReason = ""
+        return next
+    }
+    if next.assistantText.isEmpty {
+        next.incomplete = true
+        next.incompleteReason = "The active prompt scrolled out of the visible ChatGPT transcript before any assistant text was captured."
+        return next
+    }
+    if let merged = mergeAssistantTails(next.assistantText, visibleAssistantText) {
+        next.assistantText = merged
+        next.incomplete = false
+        next.incompleteReason = ""
+        return next
+    }
+    next.incomplete = true
+    next.incompleteReason = "The assistant response grew beyond the visible ChatGPT transcript and the newly visible tail could not be aligned with the previously captured text."
+    return next
+}
+
+func normalizeAssistantText(_ text: String) -> String {
+    text
+        .replacingOccurrences(of: "\r", with: "")
+        .split(separator: "\n", omittingEmptySubsequences: false)
+        .map { line in
+            String(line).replacingOccurrences(of: #"[ \t]+$"#, with: "", options: .regularExpression)
+        }
+        .joined(separator: "\n")
+        .replacingOccurrences(of: #"\n{3,}"#, with: "\n\n", options: .regularExpression)
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
@@ -366,10 +486,6 @@ func labelsContainUploadNeedle(_ labels: [String], fileName: String, prefix: Str
     return haystack.contains(fileName) || haystack.contains(prefix)
 }
 
-func recordsContainUploadNeedle(_ records: [NodeRecord], fileName: String, prefix: String) -> Bool {
-    labelsContainUploadNeedle(records.map { $0.label }, fileName: fileName, prefix: prefix)
-}
-
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
     descendants(appElement).map(record).first { item in
         guard item.role == kAXButtonRole, item.enabled ?? true else {
@@ -380,17 +496,37 @@ func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
     }
 }
 
+func uploadDialogCancelButton(_ appElement: AXUIElement) -> NodeRecord? {
+    descendants(appElement).map(record).first { item in
+        guard item.role == kAXButtonRole, item.enabled ?? true else {
+            return false
+        }
+        return normalize(item.label).range(of: "^(Cancel|Close)$",
+                                           options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
+func uploadDialogIsVisible(_ appElement: AXUIElement) -> Bool {
+    uploadDialogAcceptButton(appElement) != nil || uploadDialogCancelButton(appElement) != nil
+}
+
 func uploadDialogFileRecord(_ appElement: AXUIElement, fileName: String, prefix: String) -> NodeRecord? {
     let records = descendants(appElement).map(record)
     let exact = records.first { item in
-        guard item.role != kAXButtonRole, item.position != nil, item.size != nil else {
+        guard item.position != nil, item.size != nil else {
+            return false
+        }
+        guard item.role == "AXRow" || item.role == "AXCell" || item.role == "AXOutlineRow" || item.role == kAXStaticTextRole else {
             return false
         }
         return item.label.lowercased() == fileName
     }
     if let exact { return exact }
     return records.first { item in
-        guard item.role != kAXButtonRole, item.position != nil, item.size != nil else {
+        guard item.position != nil, item.size != nil else {
+            return false
+        }
+        guard item.role == "AXRow" || item.role == "AXCell" || item.role == "AXOutlineRow" || item.role == kAXStaticTextRole else {
             return false
         }
         let lower = item.label.lowercased()
@@ -416,6 +552,32 @@ func driveUploadSearchFallback(_ fileName: String) {
     sleepMs(150)
     key(36)
     sleepMs(250)
+}
+
+func composerAttachmentLabels(_ window: AXUIElement, composerRecord: NodeRecord) -> [String] {
+    guard let composerPosition = composerRecord.position, let composerSize = composerRecord.size else {
+        return []
+    }
+    let composerBottom = composerPosition.y + min(composerSize.height, 360)
+    return descendants(window).map(record).compactMap { item in
+        guard let position = item.position, let size = item.size else {
+            return nil
+        }
+        let lower = normalize(item.label).lowercased()
+        guard !lower.isEmpty else { return nil }
+        let bottom = position.y + size.height
+        let right = position.x + size.width
+        let withinX = right >= composerPosition.x - 40 &&
+            position.x <= composerPosition.x + composerSize.width + 80
+        let withinY = bottom >= composerPosition.y - 180 &&
+            position.y <= composerBottom + 90
+        guard withinX && withinY else { return nil }
+        if lower.range(of: "^(send|attach|search|chatgpt|new chat|share|move|sidebar)$",
+                       options: [.regularExpression, .caseInsensitive]) != nil {
+            return nil
+        }
+        return lower
+    }
 }
 
 func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Double) throws {
@@ -471,21 +633,22 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
     let prefix = String(fileName.prefix(max(8, min(18, fileName.count))))
     var didTrySearchFallback = false
     _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
-        let appRecords = descendants(appElement).map(record)
-        if let fileRecord = uploadDialogFileRecord(appElement, fileName: fileName, prefix: prefix) {
-            selectUploadDialogFile(fileRecord)
+        if uploadDialogIsVisible(appElement) {
+            if let fileRecord = uploadDialogFileRecord(appElement, fileName: fileName, prefix: prefix) {
+                selectUploadDialogFile(fileRecord)
+                if let accept = uploadDialogAcceptButton(appElement) {
+                    try? press(accept, "Open")
+                    sleepMs(300)
+                }
+            } else if !didTrySearchFallback {
+                driveUploadSearchFallback(fileName)
+                didTrySearchFallback = true
+            }
         }
-        if recordsContainUploadNeedle(appRecords, fileName: fileName, prefix: prefix),
-           let accept = uploadDialogAcceptButton(appElement) {
-            try? press(accept, "Open")
-            sleepMs(300)
-        } else if !didTrySearchFallback {
-            driveUploadSearchFallback(fileName)
-            didTrySearchFallback = true
-        }
-        let window = try chatWindow(appElement)
-        let windowLabels = descendants(window).map { label($0) }
-        return labelsContainUploadNeedle(windowLabels, fileName: fileName, prefix: prefix) ? true : nil
+        let (window, currentComposer) = try waitForComposer(appElement, timeoutMs: 1_000)
+        let attachmentLabels = composerAttachmentLabels(window, composerRecord: currentComposer)
+        return !uploadDialogIsVisible(appElement) &&
+            labelsContainUploadNeedle(attachmentLabels, fileName: fileName, prefix: prefix) ? true : nil
     } as Bool
 }
 
@@ -568,24 +731,39 @@ func run(_ input: Input) throws -> [String: Any] {
     let deadline = timeoutMs > 0
         ? Date().addingTimeInterval(timeoutMs / 1000.0)
         : nil
-    var lastAssistantText = ""
+    var captureState = AssistantCaptureState()
     var lastChangedAt = Date()
 
     while deadline == nil || Date() < deadline! {
         sleepMs(pollMs)
         let window = try chatWindow(appElement)
         let state = snapshot(window)
-        let text = assistantText(from: state, prompt: input.prompt)
-        if text != lastAssistantText {
-            lastAssistantText = text
+        let nextCaptureState = advanceAssistantCapture(
+            captureState,
+            snapshot: assistantCaptureSnapshot(from: state, prompt: input.prompt)
+        )
+        if nextCaptureState.assistantText != captureState.assistantText ||
+            nextCaptureState.promptVisibleEver != captureState.promptVisibleEver ||
+            nextCaptureState.promptVisibleNow != captureState.promptVisibleNow ||
+            nextCaptureState.incomplete != captureState.incomplete ||
+            nextCaptureState.incompleteReason != captureState.incompleteReason {
             lastChangedAt = Date()
         }
+        captureState = nextCaptureState
         let answering = state["isAnswering"] as? Bool ?? false
-        if !answering && !lastAssistantText.isEmpty && Date().timeIntervalSince(lastChangedAt) * 1000 >= stableMs {
+        let stableForMs = Date().timeIntervalSince(lastChangedAt) * 1000
+        if captureState.incomplete && !answering && stableForMs >= stableMs {
+            throw AxUploadError.message(captureState.incompleteReason)
+        }
+        if !answering &&
+            !captureState.assistantText.isEmpty &&
+            captureState.promptVisibleEver &&
+            !captureState.incomplete &&
+            stableForMs >= stableMs {
             return [
                 "ok": true,
                 "status": "complete",
-                "assistantText": lastAssistantText,
+                "assistantText": captureState.assistantText,
                 "state": state,
             ]
         }
@@ -603,6 +781,10 @@ do {
     try emit(try run(input))
 } catch let AxUploadError.message(message) where message.localizedCaseInsensitiveContains("Accessibility") {
     fail("MACOS_ACCESSIBILITY_DISABLED", message)
+} catch let AxUploadError.message(message)
+    where message.localizedCaseInsensitiveContains("visible ChatGPT transcript") ||
+        message.localizedCaseInsensitiveContains("active prompt scrolled out") {
+    fail("PSST_GPT_RESPONSE_CAPTURE_INCOMPLETE", message)
 } catch {
     fail("PSST_GPT_DIRECT_AX_FAILED", String(describing: error))
 }

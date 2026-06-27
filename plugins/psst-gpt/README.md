@@ -49,7 +49,8 @@ Linux is not currently targeted because OpenAI's current desktop download page l
 - Starts a new chat by default.
 - Writes text prompts directly into the app composer.
 - Sends the prompt through `AXPress` Accessibility actions, not screenshots, OCR, or foreground keyboard focus.
-- Reads visible transcript text from Accessibility.
+- Reads full Accessibility text values from the ChatGPT transcript nodes instead of OCR or screenshots.
+- Fails explicitly if it cannot prove that the final assistant response was captured completely.
 - Waits for the assistant response to become stable.
 - Uses no overall response timeout by default for `run`, `continue`, `task`, `audit`, and `upload-audit`.
 - Supports continuing in the active app conversation.

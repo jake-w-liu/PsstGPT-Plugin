@@ -1,6 +1,6 @@
 # PsstGPT Codex Plugin
 
-PsstGPT lets Codex send prompts to the macOS ChatGPT desktop app, bring the visible ChatGPT response back to Codex, and optionally automate source-archive uploads for large codebase audits.
+PsstGPT lets Codex send prompts to the macOS ChatGPT desktop app, bring the assistant response back through macOS Accessibility, and optionally automate source-archive uploads for large codebase audits.
 
 It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT web internals. It uses macOS Accessibility and the ChatGPT macOS app's own UI.
 
@@ -110,7 +110,7 @@ When you invoke PsstGPT:
 3. It finds the existing ChatGPT app window through Accessibility.
 4. It writes your prompt into the app composer.
 5. It presses the app send button through `AXPress`.
-6. It waits for the visible assistant response to stabilize.
+6. It waits for the assistant response to stabilize and fails if it cannot prove the capture is complete.
 7. It returns `finalDeliveryText` to Codex.
 
 The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI.
@@ -119,7 +119,7 @@ For audit workflows, PsstGPT treats short acknowledgement-only final replies suc
 
 ## Timeout Behavior
 
-The main ChatGPT response wait is unbounded by default for `run`, `continue`, `task`, `audit`, and `upload-audit`. PsstGPT now waits until the ChatGPT app finishes and the visible response stabilizes instead of cutting off long GPT Pro runs.
+The main ChatGPT response wait is unbounded by default for `run`, `continue`, `task`, `audit`, and `upload-audit`. PsstGPT now waits until the ChatGPT app finishes and the Accessibility response capture stabilizes instead of cutting off long GPT Pro runs.
 
 Use `timeoutMs` only when you want to impose a cap yourself. `timeoutMs: 0` explicitly means no overall response timeout.
 
@@ -176,7 +176,7 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"task","prompt":"debug audit the full codebase","root":"/absolute/path/to/project"}'
 ```
 
-The upload audit workflow writes the returned visible response to `chatgpt-audit-response.md` and the structured result to `chatgpt-audit-result.json` inside the generated upload bundle directory.
+The upload audit workflow uploads exactly one `source-archive.zip`, then writes the returned response to `chatgpt-audit-response.md` and the structured result to `chatgpt-audit-result.json` inside the generated upload bundle directory.
 
 If you want to set an explicit cap instead of the default no-timeout behavior:
 

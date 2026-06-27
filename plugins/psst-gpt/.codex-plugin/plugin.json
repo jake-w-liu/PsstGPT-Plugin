@@ -1,6 +1,6 @@
 {
   "name": "psst-gpt",
-  "version": "0.1.2+codex.20260627234612",
+  "version": "0.1.2+codex.local-20260628-robust1",
   "description": "Relay Codex prompts and source upload audits through the ChatGPT macOS desktop app.",
   "repository": "https://github.com/jake-w-liu/PsstGPT-Codex-Plugin",
   "author": {
@@ -10,7 +10,7 @@
   "interface": {
     "displayName": "PsstGPT",
     "shortDescription": "Send ChatGPT app tasks and source uploads.",
-    "longDescription": "PsstGPT controls an already-open macOS ChatGPT desktop app window through Accessibility automation, sends text prompts in strict-background mode, can package large codebases into one source archive for direct Swift Accessibility upload audits, waits for a stable visible assistant response with no default overall response timeout, stores app-session metadata, and returns the response to Codex. It is an independent desktop-app implementation inspired by the original Chrome-backed GPT Relay by Prompt Case, but it does not use Chrome or the browser extension.",
+    "longDescription": "PsstGPT controls an already-open macOS ChatGPT desktop app window through Accessibility automation, sends text prompts in strict-background mode, can package large codebases into one source archive for direct Swift Accessibility upload audits, waits for a stable assistant response capture with no default overall response timeout, stores app-session metadata, and returns the response to Codex. It is an independent desktop-app implementation inspired by the original Chrome-backed GPT Relay by Prompt Case, but it does not use Chrome or the browser extension.",
     "developerName": "PsstGPT Contributors",
     "category": "Productivity",
     "capabilities": [

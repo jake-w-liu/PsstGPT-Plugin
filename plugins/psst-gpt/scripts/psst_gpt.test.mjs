@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -92,6 +92,68 @@ test("completion requires stable non-transient assistant text", () => {
   );
 });
 
+test("capture state merges tail-only snapshots after the prompt scrolls out", () => {
+  const prompt = "Audit the repository";
+  let captureState = __testing.createAssistantCaptureState();
+  captureState = __testing.advanceAssistantCaptureState(
+    captureState,
+    __testing.extractAssistantCaptureSnapshot({
+      transcriptTexts: [
+        prompt,
+        "Finding 1",
+        "Finding 2",
+        "Finding 3",
+      ],
+    }, prompt)
+  );
+  captureState = __testing.advanceAssistantCaptureState(
+    captureState,
+    __testing.extractAssistantCaptureSnapshot({
+      transcriptTexts: [
+        "Finding 2",
+        "Finding 3",
+        "Finding 4",
+      ],
+    }, prompt)
+  );
+
+  assert.equal(captureState.incomplete, false);
+  assert.equal(
+    captureState.assistantText,
+    ["Finding 1", "Finding 2", "Finding 3", "Finding 4"].join("\n")
+  );
+});
+
+test("capture state fails loudly when a tail-only snapshot cannot be aligned", () => {
+  const prompt = "Audit the repository";
+  let captureState = __testing.createAssistantCaptureState();
+  captureState = __testing.advanceAssistantCaptureState(
+    captureState,
+    __testing.extractAssistantCaptureSnapshot({
+      transcriptTexts: [
+        prompt,
+        "Confirmed bug in src/a.ts:10",
+        "Confirmed bug in src/b.ts:20",
+      ],
+    }, prompt)
+  );
+  captureState = __testing.advanceAssistantCaptureState(
+    captureState,
+    __testing.extractAssistantCaptureSnapshot({
+      transcriptTexts: [
+        "Completely different trailing text",
+      ],
+    }, prompt)
+  );
+
+  assert.equal(captureState.incomplete, true);
+  assert.match(captureState.incompleteReason, /could not be aligned/i);
+  assert.equal(
+    captureState.assistantText,
+    ["Confirmed bug in src/a.ts:10", "Confirmed bug in src/b.ts:20"].join("\n")
+  );
+});
+
 test("unsupported PsstGPT options fail explicitly", () => {
   assert.throws(
     () => __testing.assertSupportedAppRelayOptions({
@@ -164,6 +226,49 @@ test("task prompt wrappers preserve exact-output requests", () => {
   assert.match(uploadPrompt, /User request: reply exactly: MARKER/);
   assert.match(textPrompt, /If the user asks for an exact output string or format/);
   assert.match(textPrompt, /User request: reply exactly: MARKER/);
+});
+
+test("verified upload audit prompts add a machine-checkable header unless exact output is requested", () => {
+  const prompt = __testing.buildVerifiedUploadAuditPrompt(
+    "Debug audit the uploaded repo.",
+    ["/tmp/source-archive.zip"]
+  );
+  const exactPrompt = __testing.buildVerifiedUploadAuditPrompt(
+    "reply exactly: MARKER",
+    ["/tmp/source-archive.zip"]
+  );
+
+  assert.match(prompt, /PsstGPT upload verification: OK source-archive\.zip/);
+  assert.match(prompt, /After that first verification line/);
+  assert.equal(exactPrompt, "reply exactly: MARKER");
+});
+
+test("upload verification header parser strips the internal verification line", () => {
+  const parsed = __testing.parseUploadVerificationHeader(
+    [
+      "PsstGPT upload verification: OK source-archive.zip",
+      "",
+      "Findings",
+      "",
+      "1. src/main.ts:10 can throw on empty input.",
+    ].join("\n"),
+    ["/tmp/source-archive.zip"]
+  );
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.verified, true);
+  assert.equal(parsed.verifiedFiles.includes("source-archive.zip"), true);
+  assert.equal(
+    parsed.bodyText,
+    ["Findings", "", "1. src/main.ts:10 can throw on empty input."].join("\n")
+  );
+
+  const missing = __testing.parseUploadVerificationHeader(
+    "Findings only",
+    ["/tmp/source-archive.zip"]
+  );
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /required upload verification header/i);
 });
 
 test("final delivery includes app session id", () => {
@@ -505,6 +610,7 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
     assert.equal(bundle.shards.length, 1);
     assert.equal(bundle.archives.length, 1);
     assert.equal(bundle.shards[0].name, "source-archive.zip");
+    assert.deepEqual((await readdir(bundle.outputDir)).sort(), ["source-archive.zip"]);
     const archiveStat = await stat(bundle.shards[0].path);
     assert.equal(archiveStat.isFile(), true);
     assert.equal(archiveStat.size > 0, true);

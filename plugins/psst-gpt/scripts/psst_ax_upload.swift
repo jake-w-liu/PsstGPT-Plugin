@@ -346,6 +346,25 @@ func pressSendAndVerify(_ record: NodeRecord, appElement: AXUIElement, prompt: S
     }
 }
 
+func labelsContainUploadNeedle(_ labels: [String], fileName: String, prefix: String) -> Bool {
+    let haystack = labels.joined(separator: "\n").lowercased()
+    return haystack.contains(fileName) || haystack.contains(prefix)
+}
+
+func recordsContainUploadNeedle(_ records: [NodeRecord], fileName: String, prefix: String) -> Bool {
+    labelsContainUploadNeedle(records.map { $0.label }, fileName: fileName, prefix: prefix)
+}
+
+func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
+    descendants(appElement).map(record).first { item in
+        guard item.role == kAXButtonRole, item.enabled ?? true else {
+            return false
+        }
+        return normalize(item.label).range(of: "^(Open|Choose|Select)$",
+                                           options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
 func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Double) throws {
     let (window, composerRecord) = try waitForComposer(appElement, timeoutMs: 15_000)
     guard let composerPosition = composerRecord.position, let composerSize = composerRecord.size else {
@@ -394,15 +413,19 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
         key(36)
     }
     sleepMs(900)
-    key(36)
-    sleepMs(300)
 
     let fileName = URL(fileURLWithPath: filePath).lastPathComponent.lowercased()
     let prefix = String(fileName.prefix(max(8, min(18, fileName.count))))
     _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
+        let appRecords = descendants(appElement).map(record)
+        if recordsContainUploadNeedle(appRecords, fileName: fileName, prefix: prefix),
+           let accept = uploadDialogAcceptButton(appElement) {
+            try? press(accept, "Open")
+            sleepMs(300)
+        }
         let window = try chatWindow(appElement)
-        let labels = descendants(window).map { label($0).lowercased() }.joined(separator: "\n")
-        return labels.contains(fileName) || labels.contains(prefix) ? true : nil
+        let windowLabels = descendants(window).map { label($0) }
+        return labelsContainUploadNeedle(windowLabels, fileName: fileName, prefix: prefix) ? true : nil
     } as Bool
 }
 

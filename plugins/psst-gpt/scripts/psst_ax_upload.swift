@@ -406,6 +406,18 @@ func selectUploadDialogFile(_ record: NodeRecord) {
     try? click(record, "Upload file row")
 }
 
+func driveUploadSearchFallback(_ fileName: String) {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    pasteboard.setString(fileName, forType: .string)
+    key(9, flags: [.maskCommand])
+    sleepMs(250)
+    key(125)
+    sleepMs(150)
+    key(36)
+    sleepMs(250)
+}
+
 func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Double) throws {
     let (window, composerRecord) = try waitForComposer(appElement, timeoutMs: 15_000)
     guard let composerPosition = composerRecord.position, let composerSize = composerRecord.size else {
@@ -457,6 +469,7 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
 
     let fileName = URL(fileURLWithPath: filePath).lastPathComponent.lowercased()
     let prefix = String(fileName.prefix(max(8, min(18, fileName.count))))
+    var didTrySearchFallback = false
     _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
         let appRecords = descendants(appElement).map(record)
         if let fileRecord = uploadDialogFileRecord(appElement, fileName: fileName, prefix: prefix) {
@@ -466,6 +479,9 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
            let accept = uploadDialogAcceptButton(appElement) {
             try? press(accept, "Open")
             sleepMs(300)
+        } else if !didTrySearchFallback {
+            driveUploadSearchFallback(fileName)
+            didTrySearchFallback = true
         }
         let window = try chatWindow(appElement)
         let windowLabels = descendants(window).map { label($0) }

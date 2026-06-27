@@ -19,6 +19,10 @@ const POLL_INTERVAL_MS = 2000;
 const RESPONSE_STABLE_MS = 8000;
 const JXA_TIMEOUT_MS = 30000;
 const DEFAULT_BACKGROUND = true;
+// Rate-limit setup dialogs so missing permissions do not interrupt every run.
+const ACCESSIBILITY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS = 25000;
+const ACCESSIBILITY_REMINDER_GIVEUP_AFTER_SEC = 20;
 // AXTextArea can report the full scrollable text height for long prompts while
 // ChatGPT's controls remain in the visible composer shell.
 const MAX_VISIBLE_COMPOSER_HEIGHT = 360;
@@ -237,7 +241,6 @@ export async function runPsstGPTTask(options = {}) {
       maxAttachmentsPerMessage: options.maxAttachmentsPerMessage,
       statePath,
       tags: dedupe([...tags, "task-router", "upload-audit"]),
-      shardBytes: options.shardBytes,
       maxSingleFileBytes: options.maxSingleFileBytes,
       includeDefaultExcludes: options.includeDefaultExcludes,
       excludeDirs: options.excludeDirs,
@@ -292,7 +295,6 @@ export async function harnessPsstGPT(options = {}) {
     prompt,
     timeoutMs: options.timeoutMs ?? DEFAULT_HARNESS_TIMEOUT_MS,
     uploadTimeoutMs: options.uploadTimeoutMs ?? 2 * 60 * 1000,
-    shardBytes: options.shardBytes,
     maxSingleFileBytes: options.maxSingleFileBytes,
     maxAttachmentsPerMessage: options.maxAttachmentsPerMessage,
     statePath: options.statePath,
@@ -304,7 +306,7 @@ export async function harnessPsstGPT(options = {}) {
     : "";
   const checks = {
     routedToUpload: result.taskPlan?.action === "upload-audit",
-    createdUploadBundle: Boolean(result.bundle?.manifestPath && result.bundle?.shards?.length),
+    createdUploadBundle: Boolean(result.bundle?.archivePath && result.bundle?.shards?.length),
     assistantContainsMarker: responseText.includes(marker),
     responseFileContainsMarker: responseFileText.includes(marker),
     resultFileWritten: result.resultPath ? await fileExists(result.resultPath) : false,
@@ -396,8 +398,8 @@ function resolvePsstGPTTaskPlan(options = {}) {
 
 function buildUploadTaskPrompt(userPrompt) {
   return [
-    "You are receiving a PsstGPT upload bundle: upload-manifest.json plus one or more source-shard zip archives.",
-    "Use the uploaded manifest and archives as the source of truth.",
+    "You are receiving a PsstGPT upload bundle as one uploaded source-archive.zip file.",
+    "Use the uploaded archive as the source of truth.",
     "If the user asks for an exact output string or format, follow that request exactly.",
     "If the request is a code audit/debug task, lead with confirmed findings ordered by severity and cite exact file paths and line numbers when possible.",
     "",
@@ -545,7 +547,6 @@ export async function createPsstGPTUploadBundle(options = {}) {
   const {
     root = process.cwd(),
     outputDir,
-    shardBytes = DEFAULT_UPLOAD_SHARD_BYTES,
     maxSingleFileBytes = DEFAULT_UPLOAD_MAX_SINGLE_FILE_BYTES,
     includeDefaultExcludes = true,
     excludeDirs = [],
@@ -560,7 +561,6 @@ export async function createPsstGPTUploadBundle(options = {}) {
     );
   }
 
-  const normalizedShardBytes = Math.max(1024, Number(shardBytes) || DEFAULT_UPLOAD_SHARD_BYTES);
   const normalizedMaxSingleFileBytes = Math.max(
     1024,
     Number(maxSingleFileBytes) || DEFAULT_UPLOAD_MAX_SINGLE_FILE_BYTES
@@ -586,68 +586,33 @@ export async function createPsstGPTUploadBundle(options = {}) {
     );
   }
 
-  const plannedShards = shardUploadFiles(files, normalizedShardBytes);
-  const shards = [];
-  for (let index = 0; index < plannedShards.length; index += 1) {
-    const shardFiles = plannedShards[index];
-    const shardName = `source-shard-${String(index + 1).padStart(3, "0")}-of-${String(plannedShards.length).padStart(3, "0")}.zip`;
-    const shardPath = path.join(bundleDir, shardName);
-    await zipRelativeFiles({
-      root: resolvedRoot,
-      zipPath: shardPath,
-      relativePaths: shardFiles.map((file) => file.path),
-    });
-    const shardStat = await stat(shardPath);
-    shards.push({
-      index: index + 1,
-      name: shardName,
-      path: shardPath,
-      bytes: shardStat.size,
-      fileCount: shardFiles.length,
-      uncompressedBytes: shardFiles.reduce((sum, file) => sum + file.bytes, 0),
-      files: shardFiles.map((file) => file.path),
-    });
-  }
-
-  const manifest = {
-    bundleId,
-    createdAt,
+  const archiveName = "source-archive.zip";
+  const archivePath = path.join(bundleDir, archiveName);
+  await zipRelativeFiles({
     root: resolvedRoot,
-    shardBytes: normalizedShardBytes,
-    maxSingleFileBytes: normalizedMaxSingleFileBytes,
-    includedFileCount: files.length,
-    includedBytes: files.reduce((sum, file) => sum + file.bytes, 0),
-    skipped,
-    shards: shards.map((shard) => ({
-      index: shard.index,
-      name: shard.name,
-      bytes: shard.bytes,
-      fileCount: shard.fileCount,
-      uncompressedBytes: shard.uncompressedBytes,
-      files: shard.files,
-    })),
-  };
-  const manifestPath = path.join(bundleDir, "upload-manifest.json");
-  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-
-  for (const shard of shards) {
-    await execFileAsync("zip", ["-q", "-j", shard.path, manifestPath], {
-      timeout: 30000,
-      maxBuffer: 1024 * 1024,
-    });
-    const updatedStat = await stat(shard.path);
-    shard.bytes = updatedStat.size;
-  }
+    zipPath: archivePath,
+    relativePaths: files.map((file) => file.path),
+  });
+  const archiveStat = await stat(archivePath);
+  const archive = buildUploadArchiveRecord({
+    index: 1,
+    name: archiveName,
+    archivePath,
+    archiveBytes: archiveStat.size,
+    files,
+  });
 
   const result = {
     ok: true,
     bundleId,
     root: resolvedRoot,
     outputDir: bundleDir,
-    manifestPath,
+    archivePath,
+    attachmentPaths: [archivePath],
     files: files.map((file) => ({ path: file.path, bytes: file.bytes })),
     skipped,
-    shards,
+    shards: [archive],
+    archives: [archive],
   };
   await writeFile(
     path.join(bundleDir, "upload-bundle.json"),
@@ -677,14 +642,16 @@ export async function uploadAuditPsstGPT(options = {}) {
     bundleOptions ?? { root, outputDir, ...bundleOptionOverrides }
   );
   const finalPrompt = requestedPrompt || [
-    "Audit the uploaded PsstGPT source archive shards for correctness.",
-    "Use upload-manifest.json to reconstruct the source tree and cite exact file paths and line numbers when possible.",
+    "Audit the uploaded PsstGPT source-archive.zip for correctness.",
+    "Use the uploaded archive to inspect the source tree and cite exact file paths and line numbers when possible.",
     "Lead with confirmed correctness findings ordered by severity.",
     "For each finding, explain the realistic failure mode and propose a precise fix.",
-    "If you cannot inspect a shard or archive, say exactly which uploaded file failed and why.",
+    "If you cannot inspect an uploaded archive, say exactly which uploaded file failed and why.",
     "Return the audit as Markdown.",
   ].join(" ");
-  const attachmentPaths = [bundle.manifestPath, ...bundle.shards.map((shard) => shard.path)];
+  const attachmentPaths = bundle.attachmentPaths?.length
+    ? bundle.attachmentPaths
+    : [bundle.archivePath, ...bundle.shards.map((shard) => shard.path)].filter(Boolean);
   const groups = chunkArray(
     attachmentPaths,
     Math.max(1, Number(maxAttachmentsPerMessage) || DEFAULT_UPLOAD_MAX_ATTACHMENTS_PER_MESSAGE)
@@ -728,7 +695,7 @@ export async function uploadAuditPsstGPT(options = {}) {
     prompt: [
       `You will receive a PsstGPT upload bundle in ${groups.length} attachment groups.`,
       "Do not audit until I send FINAL UPLOAD AUDIT REQUEST.",
-      "Read and retain the uploaded manifest and source archive shards from each group.",
+      "Read and retain the uploaded source archive zip files from each group.",
       `Bundle ID: ${bundle.bundleId}`,
       "Reply exactly: READY",
     ].join("\n"),
@@ -766,7 +733,7 @@ export async function uploadAuditPsstGPT(options = {}) {
       "FINAL UPLOAD AUDIT REQUEST.",
       `Bundle ID: ${bundle.bundleId}`,
       finalPrompt,
-      "Use only the uploaded manifest and source archive shards already provided in this chat.",
+      "Use only the uploaded source archive zip files already provided in this chat.",
     ].join("\n"),
     timeoutMs,
     waitChunkMs,
@@ -861,25 +828,22 @@ async function collectUploadFiles(root, {
   return { files, skipped };
 }
 
-function shardUploadFiles(files, shardBytes) {
-  const shards = [];
-  let current = [];
-  let currentBytes = 0;
-
-  for (const file of files) {
-    if (current.length > 0 && currentBytes + file.bytes > shardBytes) {
-      shards.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(file);
-    currentBytes += file.bytes;
-  }
-
-  if (current.length > 0) {
-    shards.push(current);
-  }
-  return shards;
+function buildUploadArchiveRecord({
+  index,
+  name,
+  archivePath,
+  archiveBytes,
+  files,
+}) {
+  return {
+    index,
+    name,
+    path: archivePath,
+    bytes: archiveBytes,
+    fileCount: files.length,
+    uncompressedBytes: files.reduce((sum, file) => sum + file.bytes, 0),
+    files: files.map((file) => file.path),
+  };
 }
 
 async function zipRelativeFiles({ root, zipPath, relativePaths }) {
@@ -895,7 +859,7 @@ async function zipRelativeFiles({ root, zipPath, relativePaths }) {
     child.on("error", (error) => {
       reject(codedError(
         "PSST_GPT_ZIP_FAILED",
-        "Could not start the zip command for the upload bundle.",
+        "Could not start the zip command for the upload bundle archive.",
         { cause: error }
       ));
     });
@@ -906,7 +870,7 @@ async function zipRelativeFiles({ root, zipPath, relativePaths }) {
       }
       reject(codedError(
         "PSST_GPT_ZIP_FAILED",
-        "The zip command failed while creating an upload bundle shard.",
+        "The zip command failed while creating an upload bundle archive.",
         { code, stderr }
       ));
     });
@@ -1008,7 +972,7 @@ async function runDirectAxUploadRelay({
     const failure = parseDirectAxHelperJson(error?.stdout || stdout) ??
       parseDirectAxHelperJson(error?.stderr || stderr);
     if (failure) {
-      throw codedError(
+      const codedFailure = codedError(
         failure.code || "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
         failure.message || "The direct Accessibility upload backend failed.",
         {
@@ -1018,6 +982,11 @@ async function runDirectAxUploadRelay({
           cause: error,
         }
       );
+      if (isAccessibilityError(codedFailure)) {
+        await maybeShowAccessibilityReminder();
+        throw decorateAccessibilityError(codedFailure);
+      }
+      throw codedFailure;
     }
     throw codedError(
       "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
@@ -1040,11 +1009,16 @@ async function runDirectAxUploadRelay({
   }
 
   if (!parsed?.ok) {
-    throw codedError(
+    const error = codedError(
       parsed?.code || "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
       parsed?.message || "The direct Accessibility upload backend failed.",
       { stdout, stderr, parsed }
     );
+    if (isAccessibilityError(error)) {
+      await maybeShowAccessibilityReminder();
+      throw decorateAccessibilityError(error);
+    }
+    throw error;
   }
   return parsed;
 }
@@ -1079,6 +1053,128 @@ function calculateDirectAxRelayTimeoutMs({
   const normalizedUploadTimeoutMs = Math.max(1, Number(uploadTimeoutMs) || 2 * 60 * 1000);
   const normalizedFileCount = Math.max(1, Number(fileCount) || 0);
   return normalizedResponseTimeoutMs + (normalizedUploadTimeoutMs * normalizedFileCount) + 30000;
+}
+
+function buildAccessibilitySetupHelpText() {
+  return [
+    "Enable Accessibility for the app running Codex, such as the Codex app, Terminal, iTerm, VS Code, or Cursor.",
+    "If macOS separately prompts, also allow /usr/bin/osascript for text relay and /usr/bin/swift for file uploads.",
+    "Then rerun the PsstGPT command.",
+  ].join(" ");
+}
+
+function buildAccessibilityReminderMessage() {
+  return [
+    "PsstGPT needs macOS Accessibility before it can control the ChatGPT app.",
+    "",
+    "Turn on Accessibility for the app running Codex, such as the Codex app, Terminal, iTerm, VS Code, or Cursor.",
+    "If macOS separately prompts, also allow /usr/bin/osascript for text relay and /usr/bin/swift for file uploads.",
+    "",
+    "Then rerun the PsstGPT command.",
+  ].join("\n");
+}
+
+function isAccessibilityError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.code === "MACOS_ACCESSIBILITY_DISABLED") {
+    return true;
+  }
+  const message = [
+    error.message,
+    error.details?.message,
+    error.parsed?.message,
+    error.stdout,
+    error.stderr,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return message.includes("accessibility") &&
+    (message.includes("not trusted") || message.includes("not enabled"));
+}
+
+function decorateAccessibilityError(error) {
+  const baseMessage = normalizeWhitespace(
+    error?.message || "macOS Accessibility automation is not enabled."
+  ).replace(/[. ]+$/, "");
+  return codedError(
+    "MACOS_ACCESSIBILITY_DISABLED",
+    `${baseMessage}. ${buildAccessibilitySetupHelpText()}`,
+    {
+      ...error,
+      originalCode: error?.code,
+    }
+  );
+}
+
+async function maybeShowAccessibilityReminder() {
+  try {
+    const store = await loadAccessibilityReminderStore();
+    if (!shouldShowAccessibilityReminder(store.lastShownAt)) {
+      return false;
+    }
+    await execFileAsync(
+      "/usr/bin/osascript",
+      ["-l", "JavaScript", "-e", ACCESSIBILITY_REMINDER_JXA],
+      {
+        env: {
+          ...process.env,
+          PSST_GPT_ACCESSIBILITY_REMINDER: JSON.stringify({
+            title: "PsstGPT Accessibility Setup",
+            message: buildAccessibilityReminderMessage(),
+            givingUpAfterSeconds: ACCESSIBILITY_REMINDER_GIVEUP_AFTER_SEC,
+          }),
+        },
+        timeout: ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS,
+        maxBuffer: 1024 * 1024,
+      }
+    );
+    await saveAccessibilityReminderStore({
+      lastShownAt: new Date().toISOString(),
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function loadAccessibilityReminderStore() {
+  const reminderPath = getAccessibilityReminderPath();
+  try {
+    const raw = await readFile(reminderPath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object") {
+      return parsed;
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw codedError(
+        "PSST_GPT_ACCESSIBILITY_REMINDER_READ_FAILED",
+        "Could not read the PsstGPT Accessibility reminder state.",
+        { cause: error }
+      );
+    }
+  }
+  return {};
+}
+
+async function saveAccessibilityReminderStore(store) {
+  const reminderPath = getAccessibilityReminderPath();
+  await mkdir(path.dirname(reminderPath), { recursive: true });
+  await writeFile(reminderPath, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+function shouldShowAccessibilityReminder(lastShownAt, now = Date.now()) {
+  if (!lastShownAt) {
+    return true;
+  }
+  const lastShownAtMs = new Date(lastShownAt).getTime();
+  if (!Number.isFinite(lastShownAtMs)) {
+    return true;
+  }
+  return now - lastShownAtMs >= ACCESSIBILITY_REMINDER_COOLDOWN_MS;
 }
 
 async function validateUploadFilePaths(filePaths = []) {
@@ -2047,15 +2143,37 @@ async function runJxa(action, payload = {}, { timeoutMs = JXA_TIMEOUT_MS } = {})
   }
 
   if (!parsed.ok) {
-    throw codedError(
+    const error = codedError(
       parsed.code || "PSST_GPT_AUTOMATION_FAILED",
       parsed.message || "ChatGPT app automation failed.",
       { details: parsed.details, stderr }
     );
+    if (isAccessibilityError(error)) {
+      await maybeShowAccessibilityReminder();
+      throw decorateAccessibilityError(error);
+    }
+    throw error;
   }
 
   return parsed.value;
 }
+
+const ACCESSIBILITY_REMINDER_JXA = String.raw`
+ObjC.import("stdlib");
+
+function run() {
+  var raw = $.getenv("PSST_GPT_ACCESSIBILITY_REMINDER") || "{}";
+  var request = JSON.parse(ObjC.unwrap(raw));
+  var app = Application.currentApplication();
+  app.includeStandardAdditions = true;
+  app.displayDialog(String(request.message || ""), {
+    withTitle: String(request.title || "PsstGPT Accessibility Setup"),
+    buttons: ["OK"],
+    defaultButton: "OK",
+    givingUpAfter: Number(request.givingUpAfterSeconds || 20)
+  });
+}
+`;
 
 const PSST_GPT_JXA = String.raw`
 function run(argv) {
@@ -2938,6 +3056,14 @@ function getAppStatePath(statePath) {
   return path.join(os.tmpdir(), "psst-gpt", "app-sessions.json");
 }
 
+function getAccessibilityReminderPath() {
+  const homeDir = globalThis.nodeRepl?.homeDir || os.homedir();
+  if (homeDir) {
+    return path.join(homeDir, ".codex", "psst-gpt", "accessibility-reminder.json");
+  }
+  return path.join(os.tmpdir(), "psst-gpt", "accessibility-reminder.json");
+}
+
 function publicAppSession(session) {
   return {
     relaySessionId: session.relaySessionId,
@@ -3091,4 +3217,8 @@ export const __testing = {
   isPossibleSendButtonRecord,
   visibleComposerBottomY,
   chunkTextByLines,
+  buildAccessibilitySetupHelpText,
+  buildAccessibilityReminderMessage,
+  isAccessibilityError,
+  shouldShowAccessibilityReminder,
 };

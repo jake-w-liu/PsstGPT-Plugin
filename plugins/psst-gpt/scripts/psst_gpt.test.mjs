@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { __testing, createPsstGPTAuditBundle, createPsstGPTUploadBundle } from "./psst_gpt.mjs";
+
+const execFileAsync = promisify(execFile);
 
 test("extractAssistantTextFromAppState reads text after the matching prompt", () => {
   const prompt = "Reply exactly: OK PsstGPT smoke 2026-06-26";
@@ -329,6 +333,51 @@ test("calculateDirectAxRelayTimeoutMs budgets upload time per file", () => {
   );
 });
 
+test("accessibility setup help text mentions the host app and helper binaries", () => {
+  const helpText = __testing.buildAccessibilitySetupHelpText();
+  const reminderText = __testing.buildAccessibilityReminderMessage();
+
+  assert.match(helpText, /Terminal/);
+  assert.match(helpText, /VS Code/);
+  assert.match(helpText, /\/usr\/bin\/osascript/);
+  assert.match(helpText, /\/usr\/bin\/swift/);
+  assert.match(reminderText, /ChatGPT app/);
+});
+
+test("accessibility error detection catches both coded and message-only failures", () => {
+  assert.equal(
+    __testing.isAccessibilityError({ code: "MACOS_ACCESSIBILITY_DISABLED", message: "disabled" }),
+    true
+  );
+  assert.equal(
+    __testing.isAccessibilityError({ message: "Accessibility is not trusted for the current process" }),
+    true
+  );
+  assert.equal(
+    __testing.isAccessibilityError({ message: "ChatGPT window missing" }),
+    false
+  );
+});
+
+test("accessibility reminder rate limit allows first run and daily retries", () => {
+  assert.equal(__testing.shouldShowAccessibilityReminder(undefined, 1000), true);
+  assert.equal(__testing.shouldShowAccessibilityReminder("not-a-date", 1000), true);
+  assert.equal(
+    __testing.shouldShowAccessibilityReminder(
+      "2026-06-27T00:00:00.000Z",
+      Date.parse("2026-06-27T12:00:00.000Z")
+    ),
+    false
+  );
+  assert.equal(
+    __testing.shouldShowAccessibilityReminder(
+      "2026-06-26T00:00:00.000Z",
+      Date.parse("2026-06-27T12:00:00.000Z")
+    ),
+    true
+  );
+});
+
 test("mergeSessionBackground keeps foreground workflows marked foreground-used", () => {
   assert.equal(__testing.mergeSessionBackground(undefined, undefined), true);
   assert.equal(__testing.mergeSessionBackground(true, true), true);
@@ -412,7 +461,7 @@ test("createPsstGPTAuditBundle writes line-numbered markdown and skips excluded 
   }
 });
 
-test("createPsstGPTUploadBundle writes zip shards and a manifest", async () => {
+test("createPsstGPTUploadBundle writes one source archive only", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-test-"));
   try {
     await mkdir(path.join(root, "src"), { recursive: true });
@@ -424,23 +473,26 @@ test("createPsstGPTUploadBundle writes zip shards and a manifest", async () => {
 
     const bundle = await createPsstGPTUploadBundle({
       root,
-      shardBytes: 1024,
-      maxSingleFileBytes: 1024,
+      maxSingleFileBytes: 2048,
     });
-    const manifest = JSON.parse(await readFile(bundle.manifestPath, "utf8"));
 
     assert.equal(bundle.root, root);
-    assert.equal(manifest.includedFileCount, 3);
+    assert.equal(bundle.archivePath.endsWith("source-archive.zip"), true);
+    assert.deepEqual(bundle.attachmentPaths, [bundle.archivePath]);
     assert.equal(bundle.files.some((file) => file.path === "src/a.js"), true);
     assert.equal(bundle.files.some((file) => file.path === "src/b.js"), true);
     assert.equal(bundle.files.some((file) => file.path === "README.md"), true);
     assert.equal(bundle.skipped.some((entry) => entry.path === "node_modules"), true);
-    assert.equal(bundle.shards.length >= 2, true);
-    for (const shard of bundle.shards) {
-      const shardStat = await stat(shard.path);
-      assert.equal(shardStat.isFile(), true);
-      assert.equal(shardStat.size > 0, true);
-    }
+    assert.equal(bundle.shards.length, 1);
+    assert.equal(bundle.archives.length, 1);
+    assert.equal(bundle.shards[0].name, "source-archive.zip");
+    const archiveStat = await stat(bundle.shards[0].path);
+    assert.equal(archiveStat.isFile(), true);
+    assert.equal(archiveStat.size > 0, true);
+    const archiveListing = await execFileAsync("unzip", ["-l", bundle.archivePath]);
+    assert.match(archiveListing.stdout, /src\/a\.js/);
+    assert.match(archiveListing.stdout, /src\/b\.js/);
+    assert.doesNotMatch(archiveListing.stdout, /upload-manifest\.json/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

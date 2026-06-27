@@ -28,7 +28,7 @@ PsstGPT is an independent desktop-app implementation, inspired by the original C
 
 The prompt `Reply exactly: OK PsstGPT smoke 2026-06-26` was sent through the app and the visible response included `OK PsstGPT smoke 2026-06-26`.
 
-The live upload harness on 2026-06-27 created a tiny marker project, uploaded `upload-manifest.json` plus `source-shard-001-of-001.zip`, and verified the visible response contained the generated `PSST_HARNESS_UPLOAD_OK_*` marker.
+The live upload harness on 2026-06-27 created a tiny marker project, uploaded the generated source archive bundle, and verified the visible response contained the generated `PSST_HARNESS_UPLOAD_OK_*` marker.
 
 ## Boundaries
 

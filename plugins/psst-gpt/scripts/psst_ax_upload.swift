@@ -415,8 +415,10 @@ func run(_ input: Input) throws -> [String: Any] {
             throw AxUploadError.message("Upload file does not exist: \(filePath)")
         }
     }
-    guard AXIsProcessTrusted() else {
-        throw AxUploadError.message("Accessibility is not trusted for the current process")
+    let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    let trustOptions = [trustPromptKey: true] as CFDictionary
+    guard AXIsProcessTrustedWithOptions(trustOptions) else {
+        throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
     }
 
     let appElement = try chatGPTAppElement()
@@ -474,6 +476,8 @@ do {
     let data = Data(CommandLine.arguments[1].utf8)
     let input = try JSONDecoder().decode(Input.self, from: data)
     try emit(try run(input))
+} catch let AxUploadError.message(message) where message.localizedCaseInsensitiveContains("Accessibility") {
+    fail("MACOS_ACCESSIBILITY_DISABLED", message)
 } catch {
     fail("PSST_GPT_DIRECT_AX_FAILED", String(describing: error))
 }

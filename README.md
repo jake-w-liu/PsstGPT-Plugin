@@ -36,6 +36,17 @@ psst-gpt@psst-gpt  installed, enabled
 
 Restart Codex or start a new Codex thread so the `psst-gpt` skill is loaded.
 
+## Accessibility Setup
+
+Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex. Depending on where you use Codex, that is usually the Codex app, Terminal, iTerm, VS Code, Cursor, or another editor host.
+
+When PsstGPT first needs UI automation, macOS may also prompt for the helper binaries that perform the relay:
+
+- Allow `/usr/bin/osascript` for the strict-background text relay.
+- Allow `/usr/bin/swift` for the foreground file-upload relay.
+
+The current Codex plugin install flow does not provide this plugin with a custom install-time setup callback. PsstGPT therefore shows its Accessibility reminder on first use when permission is missing, then rate-limits that reminder to at most once per day.
+
 ## Use It
 
 In Codex CLI, invoke the skill directly with `$psst-gpt`:
@@ -70,7 +81,9 @@ $psst-gpt Your task here
 - ChatGPT desktop app installed in `/Applications` or `~/Applications`.
 - ChatGPT app signed in and ready to use.
 - One ChatGPT app window already open somewhere on the desktop.
-- macOS Accessibility permission enabled for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them.
+- macOS Accessibility enabled for the app running Codex.
+- `/usr/bin/osascript` approved if macOS prompts during text relay.
+- `/usr/bin/swift` approved if macOS prompts during upload relay.
 
 The standard text relay will not open, recover, or foreground a missing ChatGPT window. If there is no app window, it fails with `PSST_GPT_WINDOW_MISSING_BACKGROUND` instead of interrupting your work. The upload workflow may foreground an existing ChatGPT window while it drives the native file picker.
 
@@ -212,7 +225,9 @@ Open a ChatGPT app window manually, leave it open, then rerun PsstGPT. The relay
 
 ### Accessibility Fails
 
-Enable Accessibility for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them. Text relay uses JXA/osascript; upload relay uses the direct Swift Accessibility helper.
+Open **System Settings > Privacy & Security > Accessibility** and enable the app that is running Codex, such as the Codex app, Terminal, iTerm, VS Code, or Cursor. If macOS separately prompts while PsstGPT is running, also allow `/usr/bin/osascript` for text relay and `/usr/bin/swift` for upload relay.
+
+PsstGPT now shows a local reminder dialog when it detects missing Accessibility, but it cannot run a custom installer popup during `codex plugin add`.
 
 ### Unsupported Option
 

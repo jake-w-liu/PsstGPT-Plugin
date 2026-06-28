@@ -39,6 +39,8 @@ Use the helper script at `../../scripts/psst_gpt.mjs` to:
 - User is already signed in to the ChatGPT app.
 - macOS Accessibility automation is enabled for the process running Codex, `/usr/bin/osascript`, and `/usr/bin/swift` if macOS prompts for them.
 
+You usually do not enable Accessibility for `ChatGPT.app` itself. The controlling host app and helper binaries are the permissions that matter.
+
 Do not inspect cookies, local storage, passwords, app databases, browser session stores, or hidden ChatGPT state.
 
 ## Safety Boundaries
@@ -84,6 +86,13 @@ nodeRepl.write(JSON.stringify(planPsstGPTTask({
   prompt: "debug audit the full codebase",
   root: process.cwd()
 }), null, 2));
+```
+
+Run the deterministic preflight:
+
+```js
+const { doctorPsstGPT } = await import("/absolute/path/to/plugin/scripts/psst_gpt.mjs");
+nodeRepl.write(JSON.stringify(await doctorPsstGPT(), null, 2));
 ```
 
 Run the live upload harness:

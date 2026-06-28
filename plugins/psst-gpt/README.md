@@ -23,6 +23,8 @@ If macOS prompts for helper binaries while PsstGPT runs:
 - Allow `/usr/bin/osascript` for strict-background text relay.
 - Allow `/usr/bin/swift` for the foreground upload relay.
 
+You normally do not enable Accessibility for `ChatGPT.app` itself. The controlling host app and helper binaries are the permissions PsstGPT needs.
+
 PsstGPT shows a local reminder on first use when Accessibility is missing, then rate-limits that reminder to at most once per day.
 
 ## Requirements
@@ -68,6 +70,15 @@ Strict-background audits use the text-bundle path and do not open upload dialogs
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"audit","root":"/absolute/path/to/project","background":true}'
 ```
+
+Run the deterministic preflight first when you want to know whether the current Mac/session can actually use background text relay, foreground upload relay, or both:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"doctor"}'
+```
+
+The foreground upload probe may briefly bring ChatGPT to the foreground because the native file-picker path is not strict-background.
 
 The robust task router chooses the transport automatically:
 

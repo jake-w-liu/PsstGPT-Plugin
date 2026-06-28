@@ -221,6 +221,44 @@ export async function readPsstGPTState(options = {}) {
   return runJxa("snapshot", { background });
 }
 
+export async function doctorPsstGPT() {
+  const checks = [];
+  checks.push(buildDoctorPlatformCheck());
+  if (!doctorCheckReady(checks, "platform")) {
+    return buildDoctorResult(checks);
+  }
+
+  try {
+    await assertChatGPTAppInstalled();
+    checks.push({
+      name: "chatgptApp",
+      status: "pass",
+      ready: true,
+      message: "ChatGPT.app is installed in a supported location.",
+      bundleId: APP_BUNDLE_ID,
+      nextSteps: [],
+    });
+  } catch (error) {
+    checks.push(buildDoctorFailureCheck("chatgptApp", error));
+    return buildDoctorResult(checks);
+  }
+
+  checks.push(await probeDoctorRelayMode({
+    name: "strictBackgroundTextRelay",
+    background: true,
+    allowWindowRecovery: false,
+    message: "Strict-background text relay is ready.",
+  }));
+  checks.push(await probeDoctorRelayMode({
+    name: "foregroundUploadRelay",
+    background: false,
+    allowWindowRecovery: true,
+    message: "Foreground upload relay is ready.",
+  }));
+
+  return buildDoctorResult(checks);
+}
+
 export function planPsstGPTTask(options = {}) {
   return resolvePsstGPTTaskPlan(options);
 }
@@ -2093,6 +2131,7 @@ async function ensureChatGPTAppReady({
   background = DEFAULT_BACKGROUND,
   verify = true,
   allowWindowRecovery = false,
+  returnState = false,
 } = {}) {
   if (process.platform !== "darwin") {
     throw codedError(
@@ -2117,8 +2156,13 @@ async function ensureChatGPTAppReady({
   }
 
   if (verify) {
-    await runJxa("waitReady", { background, allowWindowRecovery });
+    const readyState = await runJxa("waitReady", { background, allowWindowRecovery });
+    if (returnState) {
+      return readyState;
+    }
   }
+
+  return undefined;
 }
 
 async function assertChatGPTAppInstalled() {
@@ -4004,6 +4048,159 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function probeDoctorRelayMode({
+  name,
+  background,
+  allowWindowRecovery,
+  message,
+}) {
+  try {
+    const state = await ensureChatGPTAppReady({
+      background,
+      verify: true,
+      allowWindowRecovery,
+      returnState: true,
+    });
+    return {
+      name,
+      status: "pass",
+      ready: true,
+      message,
+      requiresForeground: background === false,
+      nextSteps: [],
+      state: summarizeDoctorState(state),
+    };
+  } catch (error) {
+    return buildDoctorFailureCheck(name, error, {
+      requiresForeground: background === false,
+    });
+  }
+}
+
+function buildDoctorPlatformCheck() {
+  if (process.platform === "darwin") {
+    return {
+      name: "platform",
+      status: "pass",
+      ready: true,
+      message: "PsstGPT is running on macOS.",
+      platform: process.platform,
+      nextSteps: [],
+    };
+  }
+
+  return buildDoctorFailureCheck(
+    "platform",
+    codedError(
+      "PSST_GPT_UNSUPPORTED_PLATFORM",
+      "PsstGPT currently supports macOS only."
+    ),
+    { platform: process.platform }
+  );
+}
+
+function buildDoctorFailureCheck(name, error, extra = {}) {
+  return {
+    name,
+    status: "fail",
+    ready: false,
+    code: error?.code ?? "PSST_GPT_FAILED",
+    message: error?.message ?? String(error),
+    nextSteps: doctorNextStepsForError(error),
+    ...extra,
+  };
+}
+
+function summarizeDoctorState(state = {}) {
+  return {
+    title: typeof state.title === "string" && state.title ? state.title : null,
+    visibleModelLabel: typeof state.visibleModelLabel === "string" && state.visibleModelLabel
+      ? state.visibleModelLabel
+      : null,
+    hasComposer: state.hasComposer === true,
+    isAnswering: state.isAnswering === true,
+    background: state.background !== false,
+    frontmostProcessName: typeof state.frontmostProcessName === "string" &&
+        state.frontmostProcessName
+      ? state.frontmostProcessName
+      : null,
+  };
+}
+
+function doctorNextStepsForError(error = {}) {
+  switch (error?.code) {
+    case "MACOS_ACCESSIBILITY_DISABLED":
+      return [
+        "Open System Settings > Privacy & Security > Accessibility and enable the app running Codex. If macOS prompts separately, also allow /usr/bin/osascript and /usr/bin/swift.",
+      ];
+    case "PSST_GPT_NOT_INSTALLED":
+      return [
+        "Install ChatGPT.app in /Applications or ~/Applications, sign in, then rerun the PsstGPT doctor.",
+      ];
+    case "PSST_GPT_WINDOW_MISSING_BACKGROUND":
+    case "PSST_GPT_WINDOW_MISSING":
+      return [
+        "Open a ChatGPT chat window manually and leave it open before rerunning PsstGPT.",
+      ];
+    case "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND":
+    case "PSST_GPT_WINDOW_SHELL_ONLY":
+      return [
+        "Relaunch ChatGPT or open a fresh chat window until macOS Accessibility exposes a real chat window with a composer, then rerun PsstGPT.",
+      ];
+    case "PSST_GPT_FOREGROUND_ACTIVATE_FAILED":
+      return [
+        "Bring ChatGPT to the foreground manually, confirm a chat composer is visible, then rerun the foreground upload workflow.",
+      ];
+    case "PSST_GPT_BUNDLE_MISMATCH":
+      return [
+        "Verify that the installed ChatGPT desktop app is OpenAI's app with bundle id com.openai.chat.",
+      ];
+    case "PSST_GPT_UNSUPPORTED_PLATFORM":
+      return [
+        "Run PsstGPT on macOS. The current plugin does not implement Windows or Linux automation backends.",
+      ];
+    default:
+      return [];
+  }
+}
+
+function doctorCheckReady(checks = [], name) {
+  return checks.some((check) => check.name === name && check.ready === true);
+}
+
+function buildDoctorResult(checks = []) {
+  const strictBackgroundTextRelay = doctorCheckReady(checks, "strictBackgroundTextRelay");
+  const foregroundUploadRelay = doctorCheckReady(checks, "foregroundUploadRelay");
+  let overallStatus = "unavailable";
+  if (strictBackgroundTextRelay && foregroundUploadRelay) {
+    overallStatus = "ready";
+  } else if (strictBackgroundTextRelay || foregroundUploadRelay) {
+    overallStatus = "degraded";
+  }
+
+  return {
+    surface: APP_SURFACE,
+    checkedAt: new Date().toISOString(),
+    overallStatus,
+    supports: {
+      strictBackgroundTextRelay,
+      foregroundUploadRelay,
+      hiddenBackgroundUploadRelay: false,
+    },
+    limitations: [
+      "Strict-background mode supports text relay only; full file upload uses foreground ChatGPT automation.",
+      "Both relay modes require a usable ChatGPT chat window with an accessible composer.",
+    ],
+    notes: [
+      "The foreground upload preflight may briefly bring ChatGPT to the foreground.",
+    ],
+    nextSteps: dedupe(
+      checks.flatMap((check) => Array.isArray(check.nextSteps) ? check.nextSteps : [])
+    ),
+    checks,
+  };
+}
+
 function codedError(code, message, extra = {}) {
   const error = new Error(message);
   error.code = code;
@@ -4021,6 +4218,8 @@ async function main() {
     result = await runPsstGPT(options);
   } else if (command === "task") {
     result = await runPsstGPTTask(options);
+  } else if (command === "doctor") {
+    result = await doctorPsstGPT(options);
   } else if (command === "plan") {
     result = planPsstGPTTask(options);
   } else if (command === "start") {
@@ -4108,4 +4307,6 @@ export const __testing = {
   persistUploadAuditFailure,
   buildVerifiedUploadAuditPrompt,
   parseUploadVerificationHeader,
+  buildDoctorResult,
+  doctorNextStepsForError,
 };

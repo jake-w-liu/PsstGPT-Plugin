@@ -704,6 +704,60 @@ test("accessibility reminder rate limit allows first run and daily retries", () 
   );
 });
 
+test("doctor next steps map common setup failures to concrete actions", () => {
+  assert.deepEqual(
+    __testing.doctorNextStepsForError({ code: "MACOS_ACCESSIBILITY_DISABLED" }),
+    [
+      "Open System Settings > Privacy & Security > Accessibility and enable the app running Codex. If macOS prompts separately, also allow /usr/bin/osascript and /usr/bin/swift.",
+    ]
+  );
+  assert.deepEqual(
+    __testing.doctorNextStepsForError({ code: "PSST_GPT_WINDOW_SHELL_ONLY" }),
+    [
+      "Relaunch ChatGPT or open a fresh chat window until macOS Accessibility exposes a real chat window with a composer, then rerun PsstGPT.",
+    ]
+  );
+});
+
+test("doctor summary reports degraded readiness when only one relay path is available", () => {
+  const result = __testing.buildDoctorResult([
+    {
+      name: "platform",
+      status: "pass",
+      ready: true,
+      nextSteps: [],
+    },
+    {
+      name: "chatgptApp",
+      status: "pass",
+      ready: true,
+      nextSteps: [],
+    },
+    {
+      name: "strictBackgroundTextRelay",
+      status: "fail",
+      ready: false,
+      nextSteps: [
+        "Relaunch ChatGPT or open a fresh chat window until macOS Accessibility exposes a real chat window with a composer, then rerun PsstGPT.",
+      ],
+    },
+    {
+      name: "foregroundUploadRelay",
+      status: "pass",
+      ready: true,
+      nextSteps: [],
+    },
+  ]);
+
+  assert.equal(result.overallStatus, "degraded");
+  assert.equal(result.supports.strictBackgroundTextRelay, false);
+  assert.equal(result.supports.foregroundUploadRelay, true);
+  assert.equal(result.supports.hiddenBackgroundUploadRelay, false);
+  assert.deepEqual(result.nextSteps, [
+    "Relaunch ChatGPT or open a fresh chat window until macOS Accessibility exposes a real chat window with a composer, then rerun PsstGPT.",
+  ]);
+});
+
 test("mergeSessionBackground keeps foreground workflows marked foreground-used", () => {
   assert.equal(__testing.mergeSessionBackground(undefined, undefined), true);
   assert.equal(__testing.mergeSessionBackground(true, true), true);

@@ -45,6 +45,8 @@ When PsstGPT first needs UI automation, macOS may also prompt for the helper bin
 - Allow `/usr/bin/osascript` for the strict-background text relay.
 - Allow `/usr/bin/swift` for the foreground file-upload relay.
 
+You normally do not enable Accessibility for `ChatGPT.app` itself. The controlling host app and helper binaries are the macOS permissions that matter for PsstGPT.
+
 The current Codex plugin install flow does not provide this plugin with a custom install-time setup callback. PsstGPT therefore shows its Accessibility reminder on first use when permission is missing, then rate-limits that reminder to at most once per day.
 
 ## Use It
@@ -147,6 +149,15 @@ From the repository root:
 node plugins/psst-gpt/scripts/psst_gpt.mjs \
   '{"command":"task","prompt":"Reply exactly: OK from PsstGPT"}'
 ```
+
+Run a deterministic preflight before a long session:
+
+```bash
+node plugins/psst-gpt/scripts/psst_gpt.mjs \
+  '{"command":"doctor"}'
+```
+
+`doctor` verifies whether this Mac/session can currently do strict-background text relay, foreground upload relay, both, or neither. The foreground upload probe may briefly bring ChatGPT to the front because the native upload path is not background-only.
 
 For long tasks, start first and poll later:
 

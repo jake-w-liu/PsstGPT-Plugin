@@ -113,7 +113,7 @@ When you invoke PsstGPT:
 6. It waits for the assistant response to stabilize and fails if it cannot prove the capture is complete.
 7. It returns `finalDeliveryText` to Codex.
 
-The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI.
+The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI, and if macOS Accessibility later drops the chat window into a transient shell-only state during that same upload wait, PsstGPT may re-foreground ChatGPT once to recover the usable window instead of failing immediately.
 
 For audit workflows, PsstGPT treats short acknowledgement-only final replies such as "I will audit..." as incomplete and sends a bounded follow-up that asks ChatGPT to perform the audit immediately. Exact-output marker prompts are excluded from this retry path.
 

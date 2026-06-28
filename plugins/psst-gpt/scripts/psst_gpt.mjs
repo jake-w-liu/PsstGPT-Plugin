@@ -1019,6 +1019,7 @@ async function relayPromptWithFileUploads({
     waitChunkMs,
     allowPending: false,
     background: true,
+    allowForegroundRecovery: true,
     responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
     onPending: async (pendingResult) => {
       await upsertAppSessionRecord({
@@ -2125,6 +2126,7 @@ async function waitForAppAssistantResponseInChunks({
   waitChunkMs,
   allowPending,
   background,
+  allowForegroundRecovery,
   responseStartTimeoutMs,
   onPending,
 }) {
@@ -2132,6 +2134,7 @@ async function waitForAppAssistantResponseInChunks({
   const normalizedWaitChunkMs = normalizePositiveDurationMs(waitChunkMs, DEFAULT_WAIT_CHUNK_MS);
   const started = Date.now();
   let progress = createAssistantWaitProgress(started);
+  let effectiveBackground = background !== false;
   let lastPending = null;
 
   while (normalizedTimeoutMs === 0 || Date.now() - started < normalizedTimeoutMs) {
@@ -2142,11 +2145,13 @@ async function waitForAppAssistantResponseInChunks({
       prompt,
       timeoutMs: chunkMs,
       allowPending: true,
-      background,
+      background: effectiveBackground,
+      allowForegroundRecovery,
       responseStartTimeoutMs,
       progress,
     });
     progress = result.progress ?? progress;
+    effectiveBackground = result.background !== false;
 
     if (result.status === "complete") {
       return result;
@@ -2176,6 +2181,7 @@ async function waitForAppAssistantResponse({
   timeoutMs,
   allowPending,
   background,
+  allowForegroundRecovery = false,
   responseStartTimeoutMs = DEFAULT_RESPONSE_START_TIMEOUT_MS,
   progress = createAssistantWaitProgress(),
 }) {
@@ -2187,14 +2193,37 @@ async function waitForAppAssistantResponse({
   const start = Date.now();
   let lastState = null;
   let currentProgress = normalizeAssistantWaitProgress(progress, start);
+  let effectiveBackground = background !== false;
 
   while (normalizedTimeoutMs === 0 || Date.now() - start < normalizedTimeoutMs) {
     await sleep(POLL_INTERVAL_MS);
-    const state = await readPsstGPTState({
-      background,
-      ensure: false,
-      allowForeground: background === false,
-    });
+    let state;
+    try {
+      state = await readPsstGPTState({
+        background: effectiveBackground,
+        ensure: false,
+        allowForeground: effectiveBackground === false,
+      });
+    } catch (error) {
+      if (!shouldAttemptForegroundRecoveryForWait({
+        allowForegroundRecovery,
+        background: effectiveBackground,
+        error,
+      })) {
+        throw error;
+      }
+      await ensureChatGPTAppReady({
+        background: false,
+        verify: true,
+        allowWindowRecovery: true,
+      });
+      effectiveBackground = false;
+      state = await readPsstGPTState({
+        background: false,
+        ensure: false,
+        allowForeground: true,
+      });
+    }
     assertNoFatalAppBlocker(state);
     lastState = state;
     currentProgress = advanceAssistantWaitProgress(currentProgress, state, prompt, Date.now());
@@ -2244,6 +2273,7 @@ async function waitForAppAssistantResponse({
         status: "complete",
         assistantText: captureState.assistantText,
         state,
+        background: effectiveBackground,
         progress: currentProgress,
       };
     }
@@ -2254,6 +2284,7 @@ async function waitForAppAssistantResponse({
       status: "pending",
       assistantText: currentProgress.captureState.assistantText,
       state: lastState,
+      background: effectiveBackground,
       progress: currentProgress,
     };
   }
@@ -2300,6 +2331,21 @@ function shouldFailResponseStart({
     responseAcceptedFromAppState(state, prompt, captureState) &&
     !captureState.incomplete &&
     stableForMs >= responseStartTimeoutMs;
+}
+
+function isRecoverableBackgroundAppStateError(error = {}) {
+  return error?.code === "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND" ||
+    error?.code === "PSST_GPT_WINDOW_MISSING_BACKGROUND";
+}
+
+function shouldAttemptForegroundRecoveryForWait({
+  allowForegroundRecovery = false,
+  background = true,
+  error,
+} = {}) {
+  return allowForegroundRecovery === true &&
+    background !== false &&
+    isRecoverableBackgroundAppStateError(error);
 }
 
 function extractAssistantTextFromAppState(state = {}, prompt = "") {
@@ -4007,6 +4053,7 @@ export const __testing = {
   shouldShowAccessibilityReminder,
   responseAcceptedFromAppState,
   shouldFailResponseStart,
+  shouldAttemptForegroundRecoveryForWait,
   persistUploadAuditFailure,
   buildVerifiedUploadAuditPrompt,
   parseUploadVerificationHeader,

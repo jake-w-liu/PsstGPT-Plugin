@@ -297,6 +297,53 @@ test("assistant wait progress preserves captured assistant text across polling c
   );
 });
 
+test("foreground recovery is only attempted for upload waits on recoverable background state errors", () => {
+  assert.equal(
+    __testing.shouldAttemptForegroundRecoveryForWait({
+      allowForegroundRecovery: true,
+      background: true,
+      error: { code: "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND" },
+    }),
+    true
+  );
+
+  assert.equal(
+    __testing.shouldAttemptForegroundRecoveryForWait({
+      allowForegroundRecovery: true,
+      background: true,
+      error: { code: "PSST_GPT_WINDOW_MISSING_BACKGROUND" },
+    }),
+    true
+  );
+
+  assert.equal(
+    __testing.shouldAttemptForegroundRecoveryForWait({
+      allowForegroundRecovery: false,
+      background: true,
+      error: { code: "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND" },
+    }),
+    false
+  );
+
+  assert.equal(
+    __testing.shouldAttemptForegroundRecoveryForWait({
+      allowForegroundRecovery: true,
+      background: false,
+      error: { code: "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND" },
+    }),
+    false
+  );
+
+  assert.equal(
+    __testing.shouldAttemptForegroundRecoveryForWait({
+      allowForegroundRecovery: true,
+      background: true,
+      error: { code: "PSST_GPT_RESPONSE_TIMEOUT" },
+    }),
+    false
+  );
+});
+
 test("unsupported PsstGPT options fail explicitly", () => {
   assert.throws(
     () => __testing.assertSupportedAppRelayOptions({

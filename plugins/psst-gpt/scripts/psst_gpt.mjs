@@ -940,7 +940,11 @@ async function relayPromptWithFileUploads({
     );
   }
 
-  await ensureChatGPTAppReady({ background: false, verify: false });
+  await ensureChatGPTAppReady({
+    background: false,
+    verify: true,
+    allowWindowRecovery: true,
+  });
   const promptText = prompt.trim();
   const existingRecord = relaySessionId
     ? await findStoredAppSessionByRelayId(relaySessionId, statePath)
@@ -1989,7 +1993,11 @@ function hasExplicitIntelligenceOption(options = {}) {
   ].some((value) => value !== undefined && value !== null && String(value).trim());
 }
 
-async function ensureChatGPTAppReady({ background = DEFAULT_BACKGROUND, verify = true } = {}) {
+async function ensureChatGPTAppReady({
+  background = DEFAULT_BACKGROUND,
+  verify = true,
+  allowWindowRecovery = false,
+} = {}) {
   if (process.platform !== "darwin") {
     throw codedError(
       "PSST_GPT_UNSUPPORTED_PLATFORM",
@@ -2013,7 +2021,7 @@ async function ensureChatGPTAppReady({ background = DEFAULT_BACKGROUND, verify =
   }
 
   if (verify) {
-    await runJxa("waitReady", { background });
+    await runJxa("waitReady", { background, allowWindowRecovery });
   }
 }
 
@@ -2695,8 +2703,11 @@ function run(argv) {
 
 function dispatch(action, payload) {
   if (action === "waitReady") {
-    return withChatGPTApp({ background: payload.background !== false }, function(context) {
-      waitForComposer(context.window, 15000);
+    return withChatGPTApp({
+      background: payload.background !== false,
+      allowWindowRecovery: payload.allowWindowRecovery === true,
+      requireComposer: true
+    }, function(context) {
       return readState(context);
     });
   }
@@ -2780,6 +2791,91 @@ function dispatch(action, payload) {
   fail("PSST_GPT_BRIDGE_UNKNOWN_ACTION", "Unknown ChatGPT app bridge action: " + action);
 }
 
+function processHasMenuBar(process) {
+  try {
+    return process.exists() && process.menuBars.length > 0;
+  } catch (error) {
+    return false;
+  }
+}
+
+function firstUsableWindow(process, requireComposer) {
+  var windows = [];
+  try {
+    windows = process.windows();
+  } catch (error) {
+    windows = [];
+  }
+  for (var index = 0; index < windows.length; index += 1) {
+    var window = windows[index];
+    if (!requireComposer || findComposerInWindow(window)) {
+      return window;
+    }
+  }
+  return requireComposer ? null : (windows.length > 0 ? windows[0] : null);
+}
+
+function findComposerInWindow(window) {
+  return firstNode(descendants(window), function(node) {
+    return safeString(function() { return node.role(); }) === "AXTextArea";
+  });
+}
+
+function clickMenuItemIfExists(process, menuBarItemName, menuItemName) {
+  try {
+    var menuBar = process.menuBars[0];
+    var menuBarItem = menuBar.menuBarItems.byName(menuBarItemName);
+    if (!menuBarItem.exists()) {
+      return false;
+    }
+    var menu = menuBarItem.menus[0];
+    var menuItem = menu.menuItems.byName(menuItemName);
+    if (!menuItem.exists()) {
+      return false;
+    }
+    pressElement(menuItem);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function attemptInteractiveWindowRecovery(systemEvents, chatgpt) {
+  var attempts = [
+    function(process) {
+      return clickMenuItemIfExists(process, "File", "New Chat");
+    },
+    function(process) {
+      return clickMenuItemIfExists(process, "File", "New Temporary Chat");
+    },
+    function(process) {
+      return clickMenuItemIfExists(process, "Window", "ChatGPT");
+    },
+    function(process) {
+      return clickMenuItemIfExists(process, "Window", "Bring All to Front");
+    }
+  ];
+
+  for (var index = 0; index < attempts.length; index += 1) {
+    try {
+      chatgpt.activate();
+    } catch (error) {
+      // Keep trying menu-based recovery even if activate is flaky.
+    }
+    delay(0.4);
+    var process = systemEvents.processes.byName("ChatGPT");
+    if (attempts[index](process)) {
+      delay(0.9);
+      process = systemEvents.processes.byName("ChatGPT");
+      if (firstUsableWindow(process, true)) {
+        return process;
+      }
+    }
+  }
+
+  return systemEvents.processes.byName("ChatGPT");
+}
+
 function withChatGPTApp(options, callback) {
   var systemEvents = Application("System Events");
   if (!systemEvents.uiElementsEnabled()) {
@@ -2811,17 +2907,18 @@ function withChatGPTApp(options, callback) {
 
   var process = systemEvents.processes.byName("ChatGPT");
   var deadline = Date.now() + 15000;
-  while ((!process.exists() || process.windows.length === 0) && Date.now() < deadline) {
+  var window = firstUsableWindow(process, options.requireComposer === true);
+  while ((!process.exists() || !window) && Date.now() < deadline) {
     delay(0.25);
     process = systemEvents.processes.byName("ChatGPT");
+    window = firstUsableWindow(process, options.requireComposer === true);
   }
-  if (!process.exists() || process.windows.length === 0) {
-    var hasMenuBar = false;
-    try {
-      hasMenuBar = process.exists() && process.menuBars.length > 0;
-    } catch (error) {
-      hasMenuBar = false;
-    }
+  if ((!process.exists() || !window) && options.background === false && options.allowWindowRecovery === true) {
+    process = attemptInteractiveWindowRecovery(systemEvents, chatgpt);
+    window = firstUsableWindow(process, options.requireComposer === true);
+  }
+  if (!process.exists() || !window) {
+    var hasMenuBar = processHasMenuBar(process);
     if (hasMenuBar) {
       if (options.background === false) {
         fail(
@@ -2840,7 +2937,6 @@ function withChatGPTApp(options, callback) {
     fail("PSST_GPT_WINDOW_MISSING_BACKGROUND", "No ChatGPT app window is available. Strict background mode will not open, recover, or foreground a ChatGPT window. Open a ChatGPT app window manually, then rerun the relay.");
   }
 
-  var window = process.windows[0];
   var context = {
     systemEvents: systemEvents,
     chatgpt: chatgpt,

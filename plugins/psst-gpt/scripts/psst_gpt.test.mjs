@@ -5,7 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
-import { __testing, createPsstGPTAuditBundle, createPsstGPTUploadBundle } from "./psst_gpt.mjs";
+import {
+  __testing,
+  auditPsstGPT,
+  createPsstGPTAuditBundle,
+  createPsstGPTUploadBundle,
+  uploadAuditPsstGPT,
+} from "./psst_gpt.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -815,6 +821,25 @@ test("chunkTextByLines preserves text content across chunks", () => {
   assert.equal(chunks.join("\n"), text);
 });
 
+test("auditPsstGPT preflights before creating the local bundle", async () => {
+  let bundleFactoryCalls = 0;
+  await assert.rejects(
+    auditPsstGPT({
+      preflight: async () => {
+        throw Object.assign(new Error("shell only"), {
+          code: "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND",
+        });
+      },
+      bundleFactory: async () => {
+        bundleFactoryCalls += 1;
+        throw new Error("bundleFactory should not run");
+      },
+    }),
+    { code: "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND" }
+  );
+  assert.equal(bundleFactoryCalls, 0);
+});
+
 test("createPsstGPTAuditBundle writes line-numbered markdown and skips excluded files", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-test-"));
   try {
@@ -839,6 +864,25 @@ test("createPsstGPTAuditBundle writes line-numbered markdown and skips excluded 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("uploadAuditPsstGPT preflights before creating the upload bundle", async () => {
+  let bundleFactoryCalls = 0;
+  await assert.rejects(
+    uploadAuditPsstGPT({
+      preflight: async () => {
+        throw Object.assign(new Error("shell only"), {
+          code: "PSST_GPT_WINDOW_SHELL_ONLY",
+        });
+      },
+      bundleFactory: async () => {
+        bundleFactoryCalls += 1;
+        throw new Error("bundleFactory should not run");
+      },
+    }),
+    { code: "PSST_GPT_WINDOW_SHELL_ONLY" }
+  );
+  assert.equal(bundleFactoryCalls, 0);
 });
 
 test("createPsstGPTUploadBundle writes one source archive only", async () => {

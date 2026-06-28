@@ -80,6 +80,8 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
 
 The foreground upload probe may briefly bring ChatGPT to the foreground because the native file-picker path is not strict-background.
 
+`audit` and `upload-audit` also preflight ChatGPT before they build local bundle output, so a shell-only or missing-window session fails early instead of wasting time packaging files first.
+
 The robust task router chooses the transport automatically:
 
 ```bash

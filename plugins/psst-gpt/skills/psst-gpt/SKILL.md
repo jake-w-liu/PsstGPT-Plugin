@@ -17,6 +17,7 @@ Do not manually choose a transport in Codex. `runPsstGPTTask` decides:
 - Automatic full-file upload: requests that say or imply full codebase, full repo, all files, full upload, zip, upload, large codebase, or no truncation route to `uploadAuditPsstGPT`. A prompt such as `$psst-gpt debug audit the full codebase` routes to this path. It packages the source tree into one `source-archive.zip`, uses the direct Swift Accessibility helper to drive the native file picker, sends the audit request, verifies the upload audit header, and writes the returned response to local Markdown/JSON files.
 - Main relay commands wait with no overall response timeout by default. Set `timeoutMs` only if you want an explicit cap. `poll` is the bounded check-in path for pending sessions.
 - Strict background/no popups: requests that explicitly ask for strict background/no popups, or are clearly lightweight text-only audits, route to `auditPsstGPT`. It builds a line-numbered Markdown audit bundle from local text files, sends it to the ChatGPT app as strict-background text chunks, then sends the final audit request.
+- Bundle-producing audit paths preflight ChatGPT readiness before building local bundle output, so shell-only or missing-window sessions fail early instead of spending time packaging files first.
 
 ## What It Does
 

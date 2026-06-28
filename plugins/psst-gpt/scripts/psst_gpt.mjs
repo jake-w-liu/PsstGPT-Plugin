@@ -581,9 +581,12 @@ export async function auditPsstGPT(options = {}) {
     outputDir,
     maxFileBytes,
     maxTotalBytes,
+    preflight = ensureStrictBackgroundRelayReady,
+    bundleFactory = createPsstGPTAuditBundle,
     ...relayOptions
   } = options;
-  const bundle = await createPsstGPTAuditBundle(
+  await preflight();
+  const bundle = await bundleFactory(
     bundleOptions ?? auditBundle ?? { root, outputDir, maxFileBytes, maxTotalBytes }
   );
   const bundleText = await readFile(bundle.markdownPath, "utf8");
@@ -699,9 +702,14 @@ export async function uploadAuditPsstGPT(options = {}) {
     statePath,
     relaySessionId = `app-${Date.now()}`,
     tags = [],
+    preflight = ensureForegroundUploadRelayReady,
+    bundleFactory = createPsstGPTUploadBundle,
     ...bundleOptionOverrides
   } = options;
-  const bundle = uploadBundle ?? await createPsstGPTUploadBundle(
+  if (!uploadBundle) {
+    await preflight();
+  }
+  const bundle = uploadBundle ?? await bundleFactory(
     bundleOptions ?? { root, outputDir, ...bundleOptionOverrides }
   );
   const finalPrompt = requestedPrompt || [
@@ -2163,6 +2171,22 @@ async function ensureChatGPTAppReady({
   }
 
   return undefined;
+}
+
+async function ensureStrictBackgroundRelayReady() {
+  await ensureChatGPTAppReady({
+    background: true,
+    verify: true,
+    allowWindowRecovery: false,
+  });
+}
+
+async function ensureForegroundUploadRelayReady() {
+  await ensureChatGPTAppReady({
+    background: false,
+    verify: true,
+    allowWindowRecovery: true,
+  });
 }
 
 async function assertChatGPTAppInstalled() {

@@ -2878,7 +2878,10 @@ function dispatch(action, payload) {
     });
   }
   if (action === "snapshot") {
-    return withChatGPTApp({ background: payload.background !== false }, function(context) {
+    return withChatGPTApp({
+      background: payload.background !== false,
+      requireComposer: true
+    }, function(context) {
       return readState(context);
     });
   }
@@ -2972,13 +2975,18 @@ function firstUsableWindow(process, requireComposer) {
   } catch (error) {
     windows = [];
   }
+  var realWindows = [];
   for (var index = 0; index < windows.length; index += 1) {
     var window = windows[index];
+    if (safeString(function() { return window.role(); }) !== "AXWindow") {
+      continue;
+    }
+    realWindows.push(window);
     if (!requireComposer || findComposerInWindow(window)) {
       return window;
     }
   }
-  return requireComposer ? null : (windows.length > 0 ? windows[0] : null);
+  return requireComposer ? null : (realWindows.length > 0 ? realWindows[0] : null);
 }
 
 function findComposerInWindow(window) {

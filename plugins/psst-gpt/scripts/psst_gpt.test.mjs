@@ -840,6 +840,27 @@ test("auditPsstGPT preflights before creating the local bundle", async () => {
   assert.equal(bundleFactoryCalls, 0);
 });
 
+test("auditPsstGPT uses a provided ready audit bundle without rebuilding it", async () => {
+  let bundleFactoryCalls = 0;
+  await assert.rejects(
+    auditPsstGPT({
+      preflight: async () => {},
+      auditBundle: {
+        bundleId: "bundle-ready",
+        markdownPath: "/definitely/missing/audit-bundle.md",
+      },
+      bundleFactory: async () => {
+        bundleFactoryCalls += 1;
+        throw Object.assign(new Error("bundleFactory called"), {
+          code: "BUNDLE_FACTORY_CALLED",
+        });
+      },
+    }),
+    { code: "ENOENT" }
+  );
+  assert.equal(bundleFactoryCalls, 0);
+});
+
 test("createPsstGPTAuditBundle writes line-numbered markdown and skips excluded files", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-test-"));
   try {

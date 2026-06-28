@@ -603,9 +603,11 @@ export async function auditPsstGPT(options = {}) {
     ...relayOptions
   } = options;
   await preflight();
-  const bundle = await bundleFactory(
-    bundleOptions ?? auditBundle ?? { root, outputDir, maxFileBytes, maxTotalBytes }
-  );
+  const bundle = isReadyAuditBundle(auditBundle)
+    ? auditBundle
+    : await bundleFactory(
+      bundleOptions ?? auditBundle ?? { root, outputDir, maxFileBytes, maxTotalBytes }
+    );
   const bundleText = await readFile(bundle.markdownPath, "utf8");
   const prompt = requestedPrompt || [
     "Audit the provided PsstGPT audit bundle for correctness.",
@@ -1920,6 +1922,13 @@ async function relayAuditBundleText({
       tags: dedupe([...tags, "audit-ack-retry"]),
     },
   });
+}
+
+function isReadyAuditBundle(bundle) {
+  return Boolean(bundle) &&
+    typeof bundle === "object" &&
+    typeof bundle.markdownPath === "string" &&
+    typeof bundle.bundleId === "string";
 }
 
 function chunkTextByLines(text, maxChars) {

@@ -2816,6 +2816,24 @@ function withChatGPTApp(options, callback) {
     process = systemEvents.processes.byName("ChatGPT");
   }
   if (!process.exists() || process.windows.length === 0) {
+    var hasMenuBar = false;
+    try {
+      hasMenuBar = process.exists() && process.menuBars.length > 0;
+    } catch (error) {
+      hasMenuBar = false;
+    }
+    if (hasMenuBar) {
+      if (options.background === false) {
+        fail(
+          "PSST_GPT_WINDOW_SHELL_ONLY",
+          "ChatGPT is running, but macOS Accessibility exposed only the app shell and no usable chat window. Open or relaunch ChatGPT, then rerun the relay."
+        );
+      }
+      fail(
+        "PSST_GPT_WINDOW_SHELL_ONLY_BACKGROUND",
+        "ChatGPT is running, but macOS Accessibility exposed only the app shell and no usable chat window. Strict background mode will not recover that state. Open or relaunch ChatGPT, then rerun the relay."
+      );
+    }
     if (options.background === false) {
       fail("PSST_GPT_WINDOW_MISSING", "No ChatGPT app window is available for foreground upload automation. Open a ChatGPT app window, then rerun the relay.");
     }

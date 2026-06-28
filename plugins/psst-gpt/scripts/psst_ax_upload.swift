@@ -270,6 +270,9 @@ func chatWindow(_ appElement: AXUIElement) throws -> AXUIElement {
         }
     }
     if let first = realWindows.first { return first }
+    if !windows.isEmpty {
+        throw AxUploadError.message("ChatGPT exposed only the app shell and no usable chat window through macOS Accessibility")
+    }
     throw AxUploadError.message("No ChatGPT window is available")
 }
 
@@ -853,8 +856,14 @@ do {
     try emit(try run(input))
 } catch let AxUploadError.coded(code, message) {
     fail(code, message)
-} catch let AxUploadError.message(message) where message.localizedCaseInsensitiveContains("Accessibility") {
+} catch let AxUploadError.message(message)
+    where message.localizedCaseInsensitiveContains("Accessibility automation is not enabled") ||
+        message.localizedCaseInsensitiveContains("Accessibility is not enabled") ||
+        message.localizedCaseInsensitiveContains("not trusted") {
     fail("MACOS_ACCESSIBILITY_DISABLED", message)
+} catch let AxUploadError.message(message)
+    where message.localizedCaseInsensitiveContains("only the app shell") {
+    fail("PSST_GPT_WINDOW_SHELL_ONLY", message)
 } catch let AxUploadError.message(message)
     where message.localizedCaseInsensitiveContains("No ChatGPT window is available") {
     fail("PSST_GPT_WINDOW_MISSING", message)

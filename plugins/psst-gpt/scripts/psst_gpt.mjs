@@ -41,6 +41,7 @@ const DEFAULT_UPLOAD_MAX_SINGLE_FILE_BYTES = DEFAULT_UPLOAD_SHARD_BYTES;
 const DEFAULT_HARNESS_TIMEOUT_MS = 5 * 60 * 1000;
 const UPLOAD_VERIFICATION_OK_PREFIX = "PsstGPT upload verification: OK";
 const UPLOAD_VERIFICATION_FAIL_PREFIX = "PsstGPT upload verification: FAILED";
+const PSST_BUNDLE_MARKER_FILENAME = ".psst-gpt-bundle.json";
 const AUDIT_TEXT_EXTENSIONS = new Set([
   ".c",
   ".cc",
@@ -558,6 +559,11 @@ export async function createPsstGPTAuditBundle(options = {}) {
   try {
     await writeFile(markdownPath, markdown, "utf8");
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    await writeBundleMarker(bundleDir, {
+      kind: "audit",
+      bundleId,
+      createdAt,
+    });
 
     let zipCreated = false;
     try {
@@ -687,6 +693,11 @@ export async function createPsstGPTUploadBundle(options = {}) {
       root: resolvedRoot,
       zipPath: archivePath,
       relativePaths: files.map((file) => file.path),
+    });
+    await writeBundleMarker(bundleDir, {
+      kind: "upload",
+      bundleId,
+      createdAt,
     });
     const archiveStat = await stat(archivePath);
     const archive = buildUploadArchiveRecord({
@@ -938,6 +949,11 @@ async function collectUploadFiles(root, {
       if (entry.isDirectory()) {
         if (directoryExcludes.has(entry.name) || directoryExcludes.has(relativePath)) {
           skipped.push({ path: relativePath, reason: "excluded directory" });
+          continue;
+        }
+        const bundleSkipReason = await generatedPsstBundleSkipReason(absolutePath);
+        if (bundleSkipReason) {
+          skipped.push({ path: relativePath, reason: bundleSkipReason });
           continue;
         }
         await walk(absolutePath);
@@ -1725,6 +1741,11 @@ async function collectAuditFiles(root, { maxFileBytes, maxTotalBytes }) {
           skipped.push({ path: relativePath, reason: "excluded directory" });
           continue;
         }
+        const bundleSkipReason = await generatedPsstBundleSkipReason(absolutePath);
+        if (bundleSkipReason) {
+          skipped.push({ path: relativePath, reason: bundleSkipReason });
+          continue;
+        }
         await walk(absolutePath);
         continue;
       }
@@ -2108,6 +2129,40 @@ async function ensureBundleOutputDir({
   }
 
   return { bundleDir, bundleDirExisted };
+}
+
+async function writeBundleMarker(bundleDir, marker = {}) {
+  const markerPath = path.join(bundleDir, PSST_BUNDLE_MARKER_FILENAME);
+  await writeFile(markerPath, `${JSON.stringify({
+    surface: APP_SURFACE,
+    ...marker,
+  }, null, 2)}\n`, "utf8");
+}
+
+async function generatedPsstBundleSkipReason(directoryPath) {
+  try {
+    const entries = await readdir(directoryPath, { withFileTypes: true });
+    const names = new Set(entries.map((entry) => entry.name));
+    if (names.has(PSST_BUNDLE_MARKER_FILENAME)) {
+      return "generated PsstGPT bundle directory";
+    }
+    if (names.has("audit-bundle.md") && names.has("manifest.json")) {
+      return "legacy PsstGPT audit bundle directory";
+    }
+    if (
+      names.has("source-archive.zip") &&
+      (
+        names.has("upload-bundle.json") ||
+        names.has("chatgpt-audit-response.md") ||
+        names.has("chatgpt-audit-result.json")
+      )
+    ) {
+      return "legacy PsstGPT upload bundle directory";
+    }
+  } catch {
+    return "";
+  }
+  return "";
 }
 
 function chunkTextByLines(text, maxChars) {

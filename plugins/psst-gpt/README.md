@@ -98,6 +98,7 @@ If upload bundling finds no eligible files, it now fails with `PSST_GPT_UPLOAD_B
 Unreadable files are skipped with a recorded reason instead of aborting the whole upload bundle.
 If you pass a previously created bundle object back into PsstGPT, its referenced paths must still be readable, and upload bundle output directories must still be writable, or PsstGPT fails explicitly with `PSST_GPT_AUDIT_BUNDLE_INVALID` or `PSST_GPT_UPLOAD_BUNDLE_INVALID`.
 If you pass `outputDir`, it must either not exist yet or already be a readable, writable directory. Existing files at that path now fail explicitly with `PSST_GPT_AUDIT_OUTPUT_DIR_INVALID` or `PSST_GPT_UPLOAD_OUTPUT_DIR_INVALID`.
+If `outputDir` lives inside the project root, later reruns now skip prior PsstGPT-generated bundle directories instead of recursively packaging earlier bundle artifacts.
 
 Main relay commands wait indefinitely by default for ChatGPT to finish. Pass `timeoutMs` only when you want to cap a run yourself. `timeoutMs: 0` explicitly keeps the response wait unbounded. The `poll` helper remains the bounded check-in path for pending sessions, and uploads still use `uploadTimeoutMs` for the file-picker wait.
 

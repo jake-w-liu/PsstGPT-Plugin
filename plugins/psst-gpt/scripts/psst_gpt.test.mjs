@@ -1054,6 +1054,35 @@ test("createPsstGPTAuditBundle rejects an outputDir that is not writable", async
   }
 });
 
+test("createPsstGPTAuditBundle skips its own prior bundle directory on rerun", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-rerun-"));
+  const outputDir = path.join(root, ".psst-audit");
+  try {
+    await writeFile(path.join(root, "src.js"), "console.log('ok');\n", "utf8");
+
+    const first = await createPsstGPTAuditBundle({
+      root,
+      outputDir,
+      maxFileBytes: 1024,
+      maxTotalBytes: 1024 * 1024,
+    });
+    const second = await createPsstGPTAuditBundle({
+      root,
+      outputDir,
+      maxFileBytes: 1024 * 1024,
+      maxTotalBytes: 1024 * 1024,
+    });
+
+    assert.deepEqual(first.files.map((file) => file.path), ["src.js"]);
+    assert.deepEqual(second.files.map((file) => file.path), ["src.js"]);
+    assert.equal(second.skipped.some((entry) =>
+      entry.path === ".psst-audit" && /PsstGPT .*bundle directory/i.test(entry.reason)
+    ), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("uploadAuditPsstGPT preflights before creating the upload bundle", async () => {
   let bundleFactoryCalls = 0;
   await assert.rejects(
@@ -1206,6 +1235,43 @@ test("createPsstGPTUploadBundle rejects an outputDir that is not writable", asyn
   }
 });
 
+test("createPsstGPTUploadBundle skips prior PsstGPT bundle directories inside the root", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-rerun-"));
+  const auditOutputDir = path.join(root, ".psst-audit");
+  const uploadOutputDir = path.join(root, ".psst-upload");
+  try {
+    await writeFile(path.join(root, "src.js"), "console.log('ok');\n", "utf8");
+
+    await createPsstGPTAuditBundle({
+      root,
+      outputDir: auditOutputDir,
+      maxFileBytes: 1024,
+      maxTotalBytes: 1024 * 1024,
+    });
+    const first = await createPsstGPTUploadBundle({
+      root,
+      outputDir: uploadOutputDir,
+      maxSingleFileBytes: 1024 * 1024,
+    });
+    const second = await createPsstGPTUploadBundle({
+      root,
+      outputDir: uploadOutputDir,
+      maxSingleFileBytes: 1024 * 1024,
+    });
+
+    assert.deepEqual(first.files.map((file) => file.path), ["src.js"]);
+    assert.deepEqual(second.files.map((file) => file.path), ["src.js"]);
+    assert.equal(first.skipped.some((entry) =>
+      entry.path === ".psst-audit" && /PsstGPT .*bundle directory/i.test(entry.reason)
+    ), true);
+    assert.equal(second.skipped.some((entry) =>
+      entry.path === ".psst-upload" && /PsstGPT .*bundle directory/i.test(entry.reason)
+    ), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("createPsstGPTUploadBundle writes one source archive only", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-test-"));
   try {
@@ -1238,7 +1304,7 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
     assert.equal(bundle.shards.length, 1);
     assert.equal(bundle.archives.length, 1);
     assert.equal(bundle.shards[0].name, "source-archive.zip");
-    assert.deepEqual((await readdir(bundle.outputDir)).sort(), ["source-archive.zip"]);
+    assert.deepEqual((await readdir(bundle.outputDir)).sort(), [".psst-gpt-bundle.json", "source-archive.zip"]);
     const archiveStat = await stat(bundle.shards[0].path);
     assert.equal(archiveStat.isFile(), true);
     assert.equal(archiveStat.size > 0, true);

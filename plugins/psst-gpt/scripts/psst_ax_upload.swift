@@ -42,11 +42,13 @@ struct AssistantCaptureState {
 enum AxUploadError: Error, CustomStringConvertible {
     case message(String)
     case coded(String, String)
+    case codedDetails(String, String, [String: Any])
 
     var description: String {
         switch self {
         case .message(let value): return value
         case .coded(_, let message): return message
+        case .codedDetails(_, let message, _): return message
         }
     }
 }
@@ -60,12 +62,15 @@ func emit(_ value: [String: Any]) throws {
     FileHandle.standardOutput.write(Data("\n".utf8))
 }
 
-func fail(_ code: String, _ message: String) -> Never {
-    let payload: [String: Any] = [
+func fail(_ code: String, _ message: String, details: [String: Any]? = nil) -> Never {
+    var payload: [String: Any] = [
         "ok": false,
         "code": code,
         "message": message,
     ]
+    if let details {
+        payload["details"] = details
+    }
     if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) {
         FileHandle.standardError.write(data)
         FileHandle.standardError.write(Data("\n".utf8))
@@ -271,19 +276,14 @@ func chatGPTAppElement() throws -> AXUIElement {
     guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.chat").first else {
         throw AxUploadError.message("ChatGPT is not running")
     }
-    _ = app.activate()
-    sleepMs(500)
+    _ = app.activate(options: [.activateAllWindows])
+    sleepMs(700)
     return AXUIElementCreateApplication(app.processIdentifier)
 }
 
 func chatWindow(_ appElement: AXUIElement) throws -> AXUIElement {
     let windows: [AXUIElement] = attr(appElement, kAXWindowsAttribute) ?? []
     let realWindows = windows.filter { stringAttr($0, kAXRoleAttribute) == kAXWindowRole }
-    for window in realWindows {
-        if descendants(window, limit: 1_000).contains(where: { stringAttr($0, kAXRoleAttribute) == kAXTextAreaRole }) {
-            return window
-        }
-    }
     if let first = realWindows.first { return first }
     if !windows.isEmpty {
         throw AxUploadError.message("ChatGPT exposed only the app shell and no usable chat window through macOS Accessibility")
@@ -472,32 +472,82 @@ func responseAccepted(_ state: [String: Any], prompt: String, captureState: Assi
 }
 
 func chooseNewChat(_ appElement: AXUIElement) throws {
-    let window = try chatWindow(appElement)
-    if let button = firstRecord(window, role: kAXButtonRole, matching: "^New chat$") {
+    var didStartNewChat = false
+    if let window = try? chatWindow(appElement),
+       let button = firstRecord(window, role: kAXButtonRole, matching: "^New chat$") {
         try press(button, "New chat")
-    } else {
+        didStartNewChat = true
+    }
+    if !didStartNewChat {
         key(45, flags: [.maskCommand])
     }
     sleepMs(1_000)
 }
 
+func recoverFromTransientComposerState(_ appElement: AXUIElement, window: AXUIElement? = nil) {
+    if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.chat").first {
+        _ = app.activate(options: [.activateAllWindows])
+        sleepMs(150)
+    }
+    if let window {
+        if let button = firstRecord(window, role: kAXButtonRole, matching: "^New chat$") {
+            try? press(button, "New chat recovery")
+        }
+    }
+    key(45, flags: [.maskCommand])
+    sleepMs(750)
+}
+
 func waitForComposer(_ appElement: AXUIElement, timeoutMs: Double) throws -> (AXUIElement, NodeRecord) {
+    let normalizedTimeoutMs = timeoutMs.isFinite ? max(0, timeoutMs) : 0
+    let deadline = normalizedTimeoutMs > 0
+        ? Date().addingTimeInterval(normalizedTimeoutMs / 1000.0)
+        : nil
+    var lastError: Error?
     var sawWindowWithoutComposer = false
-    do {
-        return try waitFor(timeoutMs, intervalMs: 250) {
+    var lastRecoveryAttemptAt = Date.distantPast
+    func recoverIfDue(_ window: AXUIElement? = nil) {
+        let elapsedMs = Date().timeIntervalSince(lastRecoveryAttemptAt) * 1000
+        guard elapsedMs >= 1_500 else {
+            return
+        }
+        lastRecoveryAttemptAt = Date()
+        recoverFromTransientComposerState(appElement, window: window)
+    }
+    while deadline == nil || Date() < deadline! {
+        do {
             let window = try chatWindow(appElement)
             guard let item = composer(window) else {
                 sawWindowWithoutComposer = true
-                return nil
+                lastError = AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+                recoverIfDue(window)
+                sleepMs(250)
+                continue
             }
             return (window, item)
+        } catch let error as AxUploadError {
+            lastError = error
+            let message = error.description.lowercased()
+            let canRecoverFromShellOnly = message.contains("only the app shell") ||
+                message.contains("no chatgpt window is available")
+            if canRecoverFromShellOnly {
+                recoverIfDue()
+                sleepMs(250)
+                continue
+            }
+            if sawWindowWithoutComposer {
+                throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+            }
+            throw error
         }
-    } catch {
-        if sawWindowWithoutComposer {
-            throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
-        }
-        throw error
     }
+    if sawWindowWithoutComposer {
+        throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+    }
+    if let lastError {
+        throw lastError
+    }
+    throw AxUploadError.message("No ChatGPT window is available")
 }
 
 func didSendStart(_ appElement: AXUIElement, prompt: String) throws -> Bool {
@@ -529,7 +579,13 @@ func pressSendAndVerify(_ record: NodeRecord, appElement: AXUIElement, prompt: S
 func labelMatchesUploadedFile(_ label: String, fileName: String) -> Bool {
     let normalizedLabel = normalize(label).lowercased()
     let normalizedFileName = normalize(fileName).lowercased()
-    if normalizedLabel.contains(normalizedFileName) {
+    let maximumAttachmentLabelLength = max(96, normalizedFileName.count + 48)
+    guard normalizedLabel.count <= maximumAttachmentLabelLength else {
+        return false
+    }
+    if normalizedLabel == normalizedFileName ||
+        normalizedLabel.hasPrefix("\(normalizedFileName) ") ||
+        normalizedLabel.hasPrefix("\(normalizedFileName),") {
         return true
     }
 
@@ -553,6 +609,53 @@ func labelMatchesUploadedFile(_ label: String, fileName: String) -> Bool {
 
 func labelsContainUploadNeedle(_ labels: [String], fileName: String) -> Bool {
     labels.contains { labelMatchesUploadedFile($0, fileName: fileName) }
+}
+
+func extractCopiedAssistantText(_ copiedText: String, prompt: String) -> String {
+    let normalizedPrompt = normalize(prompt).lowercased()
+    let lines = copiedText
+        .components(separatedBy: .newlines)
+        .map { normalize($0) }
+        .filter { !$0.isEmpty };
+    if lines.isEmpty {
+        return "";
+    }
+    var promptIndex = -1
+    if !normalizedPrompt.isEmpty {
+        for index in stride(from: lines.count - 1, through: 0, by: -1) {
+            let line = lines[index].lowercased()
+            if line == normalizedPrompt ||
+                (normalizedPrompt.count >= 80 && line.contains(String(normalizedPrompt.prefix(80)))) ||
+                (normalizedPrompt.count >= 80 && normalizedPrompt.contains(String(line.prefix(80)))) {
+                promptIndex = index
+                break
+            }
+        }
+    }
+    let assistantLines = promptIndex >= 0
+        ? Array(lines.dropFirst(promptIndex + 1))
+        : lines
+    return normalizeAssistantText(assistantLines.joined(separator: "\n")).trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
+func extractVisibleConversationTextByClipboard(_ appElement: AXUIElement) -> String {
+    let pasteboard = NSPasteboard.general
+    let snapshot = PasteboardSnapshot(pasteboard)
+    defer {
+        snapshot.restore(pasteboard)
+    }
+    let previousText = pasteboard.string(forType: .string) ?? ""
+    key(0, flags: [.maskCommand])
+    sleepMs(120)
+    key(8, flags: [.maskCommand])
+    sleepMs(120)
+    guard let copiedText = pasteboard.string(forType: .string) else {
+        return ""
+    }
+    if copiedText == previousText {
+        return ""
+    }
+    return copiedText
 }
 
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
@@ -588,7 +691,7 @@ func uploadDialogFileRecord(_ appElement: AXUIElement, fileName: String, prefix:
         guard item.role == "AXRow" || item.role == "AXCell" || item.role == "AXOutlineRow" || item.role == kAXStaticTextRole else {
             return false
         }
-        return item.label.lowercased() == fileName
+        return normalize(item.label).lowercased() == fileName
     }
     if let exact { return exact }
     return records.first { item in
@@ -598,7 +701,7 @@ func uploadDialogFileRecord(_ appElement: AXUIElement, fileName: String, prefix:
         guard item.role == "AXRow" || item.role == "AXCell" || item.role == "AXOutlineRow" || item.role == kAXStaticTextRole else {
             return false
         }
-        let lower = item.label.lowercased()
+        let lower = normalize(item.label).lowercased()
         return lower.contains(fileName) || lower == prefix
     }
 }
@@ -623,12 +726,66 @@ func driveUploadSearchFallback(_ fileName: String) {
     sleepMs(250)
 }
 
+func windowHasSheet(_ window: AXUIElement) -> Bool {
+    children(window).contains { stringAttr($0, kAXRoleAttribute) == "AXSheet" }
+}
+
+func appHasUploadSheet(_ appElement: AXUIElement) -> Bool {
+    guard let window = try? chatWindow(appElement) else {
+        return false
+    }
+    return windowHasSheet(window)
+}
+
+func dismissUploadSheetIfPresent(_ appElement: AXUIElement) {
+    guard appHasUploadSheet(appElement) else {
+        return
+    }
+    key(53)
+    sleepMs(400)
+}
+
+@discardableResult
+func pressUploadDialogAccept(_ appElement: AXUIElement) -> Bool {
+    guard let accept = uploadDialogAcceptButton(appElement) else {
+        return false
+    }
+    try? press(accept, "Open")
+    sleepMs(350)
+    return true
+}
+
+func chooseUploadDialogPath(_ filePath: String) {
+    let pasteboard = NSPasteboard.general
+    let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
+    pasteboard.clearContents()
+    pasteboard.setString(filePath, forType: .string)
+    defer { pasteboardSnapshot.restore(pasteboard) }
+
+    key(5, flags: [.maskCommand, .maskShift])
+    sleepMs(350)
+    key(9, flags: [.maskCommand])
+    sleepMs(200)
+    key(36)
+    sleepMs(800)
+    key(31, flags: [.maskCommand])
+    sleepMs(450)
+    key(36)
+    sleepMs(450)
+}
+
 func composerAttachmentLabels(_ window: AXUIElement, composerRecord: NodeRecord) -> [String] {
     guard let composerPosition = composerRecord.position, let composerSize = composerRecord.size else {
         return []
     }
+    let composerElementId = CFHash(composerRecord.element)
     let composerBottom = composerPosition.y + min(composerSize.height, 360)
     return descendants(window, limit: windowDescendantLimit).map(record).compactMap { item in
+        if CFHash(item.element) == composerElementId ||
+            item.role == kAXTextAreaRole ||
+            item.role == kAXTextFieldRole {
+            return nil
+        }
         guard let position = item.position, let size = item.size else {
             return nil
         }
@@ -646,6 +803,66 @@ func composerAttachmentLabels(_ window: AXUIElement, composerRecord: NodeRecord)
             return nil
         }
         return lower
+    }
+}
+
+func uploadConfirmationLabels(_ window: AXUIElement, composerRecord: NodeRecord) -> [String] {
+    let composerElementId = CFHash(composerRecord.element)
+    var seen = Set<String>()
+    var labels: [String] = []
+
+    for value in composerAttachmentLabels(window, composerRecord: composerRecord) {
+        if seen.insert(value).inserted {
+            labels.append(value)
+        }
+    }
+
+    for item in descendants(window, limit: windowDescendantLimit).map(record) {
+        if CFHash(item.element) == composerElementId ||
+            item.role == kAXTextAreaRole ||
+            item.role == kAXTextFieldRole {
+            continue
+        }
+        let lower = normalize(item.label).lowercased()
+        guard !lower.isEmpty, lower.count <= 160 else {
+            continue
+        }
+        if lower.range(of: "^(send|attach|search|chatgpt|new chat|share|move|sidebar|stop|cancel|close)$",
+                       options: [.regularExpression, .caseInsensitive]) != nil {
+            continue
+        }
+        if seen.insert(lower).inserted {
+            labels.append(lower)
+        }
+    }
+
+    return labels
+}
+
+struct UploadDiagnostics {
+    var iterations = 0
+    var dialogVisible = false
+    var composerVisible = false
+    var acceptButtonVisible = false
+    var fileRecordVisible = false
+    var triedSearchFallback = false
+    var lastWindowTitle = ""
+    var lastError = ""
+    var attachmentLabels: [String] = []
+
+    func details(fileName: String) -> [String: Any] {
+        [
+            "fileName": fileName,
+            "iterations": iterations,
+            "dialogVisible": dialogVisible,
+            "composerVisible": composerVisible,
+            "acceptButtonVisible": acceptButtonVisible,
+            "fileRecordVisible": fileRecordVisible,
+            "triedSearchFallback": triedSearchFallback,
+            "lastWindowTitle": lastWindowTitle,
+            "lastError": lastError,
+            "attachmentLabels": Array(attachmentLabels.prefix(30)),
+        ]
     }
 }
 
@@ -676,68 +893,93 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
     }
     try press(attach, "Attach")
     sleepMs(400)
-    let uploadItem: NodeRecord = try waitFor(5_000, intervalMs: 100) {
+    let uploadMenuTimeoutMs = max(
+        5_000,
+        min(Int(uploadTimeoutMs), 12_000)
+    )
+    let uploadItem: NodeRecord = try waitFor(Double(uploadMenuTimeoutMs), intervalMs: 100) {
         descendants(appElement, limit: appDescendantLimit).map(record).first {
             $0.role == kAXMenuItemRole && $0.label.range(of: "Upload file", options: [.caseInsensitive]) != nil
         }
     }
     try press(uploadItem, "Upload file")
-    sleepMs(800)
+    let uploadDialogTimeoutMs = max(
+        5_000,
+        min(uploadTimeoutMs, 15_000)
+    )
+    _ = try waitFor(uploadDialogTimeoutMs, intervalMs: 150) {
+        uploadDialogIsVisible(appElement) ? true : nil
+    } as Bool
 
-    let pasteboard = NSPasteboard.general
-    let pasteboardSnapshot = PasteboardSnapshot(pasteboard)
-    do {
-        pasteboard.clearContents()
-        pasteboard.setString(filePath, forType: .string)
-        defer { pasteboardSnapshot.restore(pasteboard) }
-        key(5, flags: [.maskCommand, .maskShift])
-        sleepMs(400)
-        key(9, flags: [.maskCommand])
-        sleepMs(200)
-        key(36)
-    }
+    chooseUploadDialogPath(filePath)
     sleepMs(900)
 
     let fileName = URL(fileURLWithPath: filePath).lastPathComponent.lowercased()
-    let prefix = String(fileName.prefix(max(8, min(18, fileName.count))))
-    var didTrySearchFallback = false
-    // After the system picker closes, the chat composer should return promptly.
-    // If it does not, fail explicitly instead of idling for the full upload timeout.
+    var didRetryPathPaste = false
     let composerRecoveryTimeoutMs = max(5_000, min(uploadTimeoutMs, 15_000))
     var composerMissingAfterDialogAt: Date?
-    _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
-        let dialogVisible = uploadDialogIsVisible(appElement)
-        if dialogVisible {
-            composerMissingAfterDialogAt = nil
-            if let fileRecord = uploadDialogFileRecord(appElement, fileName: fileName, prefix: prefix) {
-                selectUploadDialogFile(fileRecord)
-                if let accept = uploadDialogAcceptButton(appElement) {
-                    try? press(accept, "Open")
-                    sleepMs(300)
+    var diagnostics = UploadDiagnostics()
+    do {
+        _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
+            diagnostics.iterations += 1
+            let window = try chatWindow(appElement)
+            if windowHasSheet(window) {
+                diagnostics.dialogVisible = true
+                diagnostics.composerVisible = false
+                diagnostics.acceptButtonVisible = false
+                composerMissingAfterDialogAt = nil
+                if !didRetryPathPaste && diagnostics.iterations >= 4 {
+                    chooseUploadDialogPath(filePath)
+                    didRetryPathPaste = true
+                    diagnostics.triedSearchFallback = true
+                } else {
+                    key(31, flags: [.maskCommand])
+                    sleepMs(250)
+                    key(36)
+                    sleepMs(250)
                 }
-            } else if !didTrySearchFallback {
-                driveUploadSearchFallback(fileName)
-                didTrySearchFallback = true
+                return nil
             }
-        }
-        let window = try chatWindow(appElement)
-        if let currentComposer = composer(window) {
-            composerMissingAfterDialogAt = nil
-            let attachmentLabels = composerAttachmentLabels(window, composerRecord: currentComposer)
-            return !dialogVisible &&
-                labelsContainUploadNeedle(attachmentLabels, fileName: fileName) ? true : nil
-        }
-        guard !dialogVisible else { return nil }
-        if composerMissingAfterDialogAt == nil {
-            composerMissingAfterDialogAt = Date()
+
+            diagnostics.dialogVisible = false
+            diagnostics.lastWindowTitle = stringAttr(window, kAXTitleAttribute)
+            diagnostics.lastError = ""
+            if let currentComposer = composer(window) {
+                diagnostics.composerVisible = true
+                composerMissingAfterDialogAt = nil
+                let attachmentLabels = uploadConfirmationLabels(window, composerRecord: currentComposer)
+                diagnostics.attachmentLabels = attachmentLabels
+                return labelsContainUploadNeedle(attachmentLabels, fileName: fileName) ? true : nil
+            }
+            diagnostics.composerVisible = false
+            if composerMissingAfterDialogAt == nil {
+                composerMissingAfterDialogAt = Date()
+                return nil
+            }
+            let missingForMs = Date().timeIntervalSince(composerMissingAfterDialogAt!) * 1000
+            if missingForMs >= composerRecoveryTimeoutMs {
+                throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+            }
             return nil
+        } as Bool
+    } catch let error as AxUploadError {
+        dismissUploadSheetIfPresent(appElement)
+        if error.description.localizedCaseInsensitiveContains("No ChatGPT composer is available") {
+            throw error
         }
-        let missingForMs = Date().timeIntervalSince(composerMissingAfterDialogAt!) * 1000
-        if missingForMs >= composerRecoveryTimeoutMs {
-            throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
-        }
-        return nil
-    } as Bool
+        throw AxUploadError.codedDetails(
+            "PSST_GPT_UPLOAD_NOT_CONFIRMED",
+            "The ChatGPT app did not show \(fileName) as an attached file before the upload timeout.",
+            diagnostics.details(fileName: fileName)
+        )
+    } catch {
+        dismissUploadSheetIfPresent(appElement)
+        throw AxUploadError.codedDetails(
+            "PSST_GPT_UPLOAD_NOT_CONFIRMED",
+            "The ChatGPT app did not show \(fileName) as an attached file before the upload timeout.",
+            diagnostics.details(fileName: fileName)
+        )
+    }
 }
 
 func sendIfNeeded(_ appElement: AXUIElement, prompt: String) throws {
@@ -882,15 +1124,33 @@ func run(_ input: Input) throws -> [String: Any] {
     var captureState = AssistantCaptureState()
     var lastChangedAt = Date()
     var responseStartedEver = false
+    var attemptedClipboardRecovery = false
 
     while deadline == nil || Date() < deadline! {
         sleepMs(pollMs)
         let window = try chatWindow(appElement)
         let state = snapshot(window)
-        let nextCaptureState = advanceAssistantCapture(
+        var nextCaptureState = advanceAssistantCapture(
             captureState,
             snapshot: assistantCaptureSnapshot(from: state, prompt: input.prompt)
         )
+        if nextCaptureState.incomplete &&
+            !attemptedClipboardRecovery {
+            attemptedClipboardRecovery = true
+            let copiedText = extractVisibleConversationTextByClipboard(appElement)
+            let copiedAssistantText = extractCopiedAssistantText(copiedText, prompt: input.prompt)
+            if !copiedAssistantText.isEmpty {
+                nextCaptureState = AssistantCaptureState(
+                    assistantText: copiedAssistantText,
+                    promptVisibleEver: true,
+                    promptVisibleNow: nextCaptureState.promptVisibleNow,
+                    incomplete: false,
+                    incompleteReason: "",
+                    lastVisibleAssistantText: copiedAssistantText
+                )
+                responseStartedEver = true
+            }
+        }
         if nextCaptureState.assistantText != captureState.assistantText ||
             nextCaptureState.promptVisibleEver != captureState.promptVisibleEver ||
             nextCaptureState.promptVisibleNow != captureState.promptVisibleNow ||
@@ -941,6 +1201,8 @@ do {
     let data = Data(CommandLine.arguments[1].utf8)
     let input = try JSONDecoder().decode(Input.self, from: data)
     try emit(try run(input))
+} catch let AxUploadError.codedDetails(code, message, details) {
+    fail(code, message, details: details)
 } catch let AxUploadError.coded(code, message) {
     fail(code, message)
 } catch let AxUploadError.message(message)

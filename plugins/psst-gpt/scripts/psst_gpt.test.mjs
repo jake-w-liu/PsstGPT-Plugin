@@ -668,6 +668,18 @@ test("audit retry prompt is skipped for exact-output requests", () => {
   assert.equal(__testing.isExactOutputRequest("reply exactly OK"), true);
   assert.equal(
     __testing.isExactOutputRequest(
+      "User request: debug audit the full codebase. Read the uploaded source files and reply exactly with the marker string MARKER and no other text."
+    ),
+    true
+  );
+  assert.equal(
+    __testing.isExactOutputRequest(
+      "If you cannot inspect an uploaded archive, say exactly which uploaded file failed and why."
+    ),
+    false
+  );
+  assert.equal(
+    __testing.isExactOutputRequest(
       "If the user asks for an exact output string, follow it.\n\nUser request: debug audit the codebase"
     ),
     false
@@ -721,7 +733,7 @@ test("calculateDirectAxRelayTimeoutMs budgets upload time per file", () => {
       uploadTimeoutMs: 2000,
       fileCount: 3,
     }),
-    336000
+    426000
   );
 });
 
@@ -752,7 +764,7 @@ test("calculateDirectAxRelayTimeoutMs stays bounded when the AX helper returns a
       fileCount: 3,
       returnAfterSend: true,
     }),
-    36000
+    126000
   );
 });
 

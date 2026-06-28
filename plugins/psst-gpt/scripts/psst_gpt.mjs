@@ -28,7 +28,9 @@ const DEFAULT_BACKGROUND = true;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_UPLOAD_RESPONSE_START_TIMEOUT_MS = 0;
 const DIRECT_AX_PROBE_TIMEOUT_MS = 30 * 1000;
-const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = 5 * 60 * 1000;
+const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = 90 * 1000;
+const DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS = 15 * 1000;
+const DIRECT_AX_UPLOAD_PROCESS_OVERHEAD_MS = 120 * 1000;
 // Rate-limit setup dialogs so missing permissions do not interrupt every run.
 const ACCESSIBILITY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS = 25000;
@@ -788,7 +790,6 @@ export async function uploadAuditPsstGPT(options = {}) {
           verifiedFinalPrompt,
           "",
           `PsstGPT upload bundle: ${bundle.bundleId}`,
-          `Attached files: ${attachmentPaths.map((filePath) => path.basename(filePath)).join(", ")}`,
         ].join("\n"),
         filePaths: groups[0],
         newChat: true,
@@ -848,7 +849,6 @@ export async function uploadAuditPsstGPT(options = {}) {
         prompt: [
           `PsstGPT upload bundle attachment group ${index + 1}/${groups.length}.`,
           `Bundle ID: ${bundle.bundleId}`,
-          `Attached files: ${groups[index].map((filePath) => path.basename(filePath)).join(", ")}`,
           `Reply exactly: ACK ${index + 1}`,
         ].join("\n"),
         filePaths: groups[index],
@@ -1269,14 +1269,23 @@ async function probeDirectAxUploadRelayReady({
   let lastFailure;
   for (const attemptTimeoutMs of attemptTimeouts) {
     try {
-      return await readDirectAxPsstGPTState({
+      const helperTimeoutMs = attemptTimeoutMs === 0
+        ? 0
+        : attemptTimeoutMs + DIRECT_AX_PROBE_PROCESS_OVERHEAD_MS;
+      const result = await runDirectAxHelper({
+        action: "probe",
+        prompt: "",
+        filePaths: [],
+        uploadTimeoutMs: attemptTimeoutMs,
         restoreFrontmostOnExit,
-        timeoutMs: attemptTimeoutMs,
+      }, {
+        timeoutMs: helperTimeoutMs,
         genericFailureCode: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
         genericFailureMessage: "ChatGPT app foreground upload readiness probe failed in the direct Accessibility backend.",
         invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
         invalidResponseMessage: "The direct Accessibility foreground probe returned invalid JSON.",
       });
+      return result?.state ?? result;
     } catch (error) {
       lastFailure = error;
       if (!isDirectAxProbeRetryableTimeout(error) || attemptTimeoutMs === attemptTimeouts.at(-1)) {
@@ -1424,13 +1433,15 @@ function calculateDirectAxRelayTimeoutMs({
     if (normalizedUploadTimeoutMs === 0) {
       return 0;
     }
-    return (normalizedUploadTimeoutMs * normalizedFileCount) + 30000;
+    return (normalizedUploadTimeoutMs * normalizedFileCount) + DIRECT_AX_UPLOAD_PROCESS_OVERHEAD_MS;
   }
   const normalizedResponseTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   if (normalizedResponseTimeoutMs === 0 || normalizedUploadTimeoutMs === 0) {
     return 0;
   }
-  return normalizedResponseTimeoutMs + (normalizedUploadTimeoutMs * normalizedFileCount) + 30000;
+  return normalizedResponseTimeoutMs +
+    (normalizedUploadTimeoutMs * normalizedFileCount) +
+    DIRECT_AX_UPLOAD_PROCESS_OVERHEAD_MS;
 }
 
 function buildAccessibilitySetupHelpText() {
@@ -2421,8 +2432,11 @@ function buildAuditRetryPrompt({ bundleId, requestedPrompt, attempt } = {}) {
 
 function isExactOutputRequest(text = "") {
   const normalized = normalizeWhitespace(text).toLowerCase();
-  return /\buser request:\s*(?:reply|return|output|print|say)\s+exactly\b/.test(normalized) ||
-    /^(?:reply|return|output|print|say)\s+exactly\b/.test(normalized);
+  const userRequestMatch = normalized.match(/\buser request:\s*(.*)$/);
+  const requestText = userRequestMatch?.[1] ?? normalized;
+  return /(?:^|[\s.;:!?])(?:reply|return|output|print|respond)\s+exactly\b/.test(requestText) ||
+    /\bno other text\b/.test(requestText) ||
+    /\bexact(?: output|string| format)\b/.test(requestText);
 }
 
 function isLikelyAcknowledgementOnlyAuditResponse(text = "") {

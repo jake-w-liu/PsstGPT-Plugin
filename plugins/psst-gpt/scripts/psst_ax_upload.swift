@@ -11,6 +11,7 @@ struct Input: Decodable {
     let responseStableMs: Double?
     let pollIntervalMs: Double?
     let responseStartTimeoutMs: Double?
+    let returnAfterSend: Bool?
 }
 
 struct NodeRecord {
@@ -47,6 +48,9 @@ enum AxUploadError: Error, CustomStringConvertible {
         }
     }
 }
+
+let windowDescendantLimit = 4_000
+let appDescendantLimit = 2_500
 
 func emit(_ value: [String: Any]) throws {
     let data = try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
@@ -271,7 +275,7 @@ func chatWindow(_ appElement: AXUIElement) throws -> AXUIElement {
 
 func firstRecord(_ root: AXUIElement, role: String? = nil, matching pattern: String? = nil) -> NodeRecord? {
     let regex = pattern.flatMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
-    for element in descendants(root) {
+    for element in descendants(root, limit: windowDescendantLimit) {
         let item = record(element)
         if let role, item.role != role { continue }
         if let regex {
@@ -288,7 +292,7 @@ func composer(_ window: AXUIElement) -> NodeRecord? {
 }
 
 func snapshot(_ window: AXUIElement) -> [String: Any] {
-    let nodes = descendants(window)
+    let nodes = descendants(window, limit: windowDescendantLimit)
     let records = nodes.map(record)
     let composerRecord = records.first { $0.role == kAXTextAreaRole }
     let composerTop = composerRecord?.position?.y ?? CGFloat.greatestFiniteMagnitude
@@ -510,7 +514,7 @@ func labelsContainUploadNeedle(_ labels: [String], fileName: String, prefix: Str
 }
 
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
-    descendants(appElement).map(record).first { item in
+    descendants(appElement, limit: appDescendantLimit).map(record).first { item in
         guard item.role == kAXButtonRole, item.enabled ?? true else {
             return false
         }
@@ -520,7 +524,7 @@ func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
 }
 
 func uploadDialogCancelButton(_ appElement: AXUIElement) -> NodeRecord? {
-    descendants(appElement).map(record).first { item in
+    descendants(appElement, limit: appDescendantLimit).map(record).first { item in
         guard item.role == kAXButtonRole, item.enabled ?? true else {
             return false
         }
@@ -534,7 +538,7 @@ func uploadDialogIsVisible(_ appElement: AXUIElement) -> Bool {
 }
 
 func uploadDialogFileRecord(_ appElement: AXUIElement, fileName: String, prefix: String) -> NodeRecord? {
-    let records = descendants(appElement).map(record)
+    let records = descendants(appElement, limit: appDescendantLimit).map(record)
     let exact = records.first { item in
         guard item.position != nil, item.size != nil else {
             return false
@@ -582,7 +586,7 @@ func composerAttachmentLabels(_ window: AXUIElement, composerRecord: NodeRecord)
         return []
     }
     let composerBottom = composerPosition.y + min(composerSize.height, 360)
-    return descendants(window).map(record).compactMap { item in
+    return descendants(window, limit: windowDescendantLimit).map(record).compactMap { item in
         guard let position = item.position, let size = item.size else {
             return nil
         }
@@ -609,7 +613,7 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
         throw AxUploadError.message("Composer geometry is unavailable")
     }
     let composerBottom = composerPosition.y + min(composerSize.height, 360)
-    let buttons = descendants(window).map(record)
+    let buttons = descendants(window, limit: windowDescendantLimit).map(record)
         .filter { $0.role == kAXButtonRole && ($0.enabled ?? true) && $0.position != nil && $0.size != nil }
     let candidates = buttons.filter { item in
         if item.label.range(of: "Attach", options: [.caseInsensitive]) != nil { return true }
@@ -631,7 +635,7 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
     try press(attach, "Attach")
     sleepMs(400)
     let uploadItem: NodeRecord = try waitFor(5_000, intervalMs: 100) {
-        descendants(appElement).map(record).first {
+        descendants(appElement, limit: appDescendantLimit).map(record).first {
             $0.role == kAXMenuItemRole && $0.label.range(of: "Upload file", options: [.caseInsensitive]) != nil
         }
     }
@@ -655,8 +659,14 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
     let fileName = URL(fileURLWithPath: filePath).lastPathComponent.lowercased()
     let prefix = String(fileName.prefix(max(8, min(18, fileName.count))))
     var didTrySearchFallback = false
+    // After the system picker closes, the chat composer should return promptly.
+    // If it does not, fail explicitly instead of idling for the full upload timeout.
+    let composerRecoveryTimeoutMs = max(5_000, min(uploadTimeoutMs, 15_000))
+    var composerMissingAfterDialogAt: Date?
     _ = try waitFor(uploadTimeoutMs, intervalMs: 500) {
-        if uploadDialogIsVisible(appElement) {
+        let dialogVisible = uploadDialogIsVisible(appElement)
+        if dialogVisible {
+            composerMissingAfterDialogAt = nil
             if let fileRecord = uploadDialogFileRecord(appElement, fileName: fileName, prefix: prefix) {
                 selectUploadDialogFile(fileRecord)
                 if let accept = uploadDialogAcceptButton(appElement) {
@@ -668,10 +678,23 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
                 didTrySearchFallback = true
             }
         }
-        let (window, currentComposer) = try waitForComposer(appElement, timeoutMs: 1_000)
-        let attachmentLabels = composerAttachmentLabels(window, composerRecord: currentComposer)
-        return !uploadDialogIsVisible(appElement) &&
-            labelsContainUploadNeedle(attachmentLabels, fileName: fileName, prefix: prefix) ? true : nil
+        let window = try chatWindow(appElement)
+        if let currentComposer = composer(window) {
+            composerMissingAfterDialogAt = nil
+            let attachmentLabels = composerAttachmentLabels(window, composerRecord: currentComposer)
+            return !dialogVisible &&
+                labelsContainUploadNeedle(attachmentLabels, fileName: fileName, prefix: prefix) ? true : nil
+        }
+        guard !dialogVisible else { return nil }
+        if composerMissingAfterDialogAt == nil {
+            composerMissingAfterDialogAt = Date()
+            return nil
+        }
+        let missingForMs = Date().timeIntervalSince(composerMissingAfterDialogAt!) * 1000
+        if missingForMs >= composerRecoveryTimeoutMs {
+            throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+        }
+        return nil
     } as Bool
 }
 
@@ -684,7 +707,7 @@ func sendIfNeeded(_ appElement: AXUIElement, prompt: String) throws {
     }
     if let currentComposer = composer(window), let composerPosition = currentComposer.position, let composerSize = currentComposer.size {
         let composerBottom = composerPosition.y + min(composerSize.height, 360)
-        let candidates = descendants(window).map(record).filter { item in
+        let candidates = descendants(window, limit: windowDescendantLimit).map(record).filter { item in
             guard item.role == kAXButtonRole, item.enabled ?? true, let position = item.position, let size = item.size else {
                 return false
             }
@@ -747,6 +770,15 @@ func run(_ input: Input) throws -> [String: Any] {
         try uploadFile(filePath, appElement: appElement, uploadTimeoutMs: uploadTimeoutMs)
     }
     try sendIfNeeded(appElement, prompt: input.prompt)
+    if input.returnAfterSend == true {
+        let window = try chatWindow(appElement)
+        return [
+            "ok": true,
+            "status": "pending",
+            "assistantText": "",
+            "state": snapshot(window),
+        ]
+    }
 
     let timeoutMs = normalizeTimeoutMs(input.timeoutMs, fallback: 0)
     let stableMs = input.responseStableMs ?? 8_000

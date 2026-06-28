@@ -92,6 +92,79 @@ test("completion requires stable non-transient assistant text", () => {
   );
 });
 
+test("response acceptance detection uses either visible prompt or a cleared composer", () => {
+  const prompt = "Audit this upload";
+
+  assert.equal(
+    __testing.responseAcceptedFromAppState(
+      { composerValue: prompt },
+      prompt,
+      { ...__testing.createAssistantCaptureState(), promptVisibleEver: false, incomplete: false }
+    ),
+    false
+  );
+
+  assert.equal(
+    __testing.responseAcceptedFromAppState(
+      { composerValue: "" },
+      prompt,
+      { ...__testing.createAssistantCaptureState(), promptVisibleEver: false, incomplete: false }
+    ),
+    true
+  );
+
+  assert.equal(
+    __testing.responseAcceptedFromAppState(
+      { composerValue: prompt },
+      prompt,
+      { ...__testing.createAssistantCaptureState(), promptVisibleEver: true, incomplete: false }
+    ),
+    true
+  );
+});
+
+test("response start guard fails only when ChatGPT accepted the prompt but never started", () => {
+  const prompt = "Audit this upload";
+  const idleCapture = { ...__testing.createAssistantCaptureState(), promptVisibleEver: false, incomplete: false };
+  const acceptedCapture = { ...__testing.createAssistantCaptureState(), promptVisibleEver: true, incomplete: false };
+
+  assert.equal(
+    __testing.shouldFailResponseStart({
+      responseStartedEver: false,
+      state: { composerValue: prompt, isAnswering: false },
+      prompt,
+      captureState: idleCapture,
+      stableForMs: 120000,
+      responseStartTimeoutMs: 90000,
+    }),
+    false
+  );
+
+  assert.equal(
+    __testing.shouldFailResponseStart({
+      responseStartedEver: false,
+      state: { composerValue: "", isAnswering: false },
+      prompt,
+      captureState: acceptedCapture,
+      stableForMs: 120000,
+      responseStartTimeoutMs: 90000,
+    }),
+    true
+  );
+
+  assert.equal(
+    __testing.shouldFailResponseStart({
+      responseStartedEver: true,
+      state: { composerValue: "", isAnswering: true },
+      prompt,
+      captureState: acceptedCapture,
+      stableForMs: 120000,
+      responseStartTimeoutMs: 90000,
+    }),
+    false
+  );
+});
+
 test("capture state merges tail-only snapshots after the prompt scrolls out", () => {
   const prompt = "Audit the repository";
   let captureState = __testing.createAssistantCaptureState();
@@ -454,6 +527,18 @@ test("calculateDirectAxRelayTimeoutMs disables the child timeout when response w
       fileCount: 3,
     }),
     0
+  );
+});
+
+test("calculateDirectAxRelayTimeoutMs stays bounded when the AX helper returns after send", () => {
+  assert.equal(
+    __testing.calculateDirectAxRelayTimeoutMs({
+      timeoutMs: 0,
+      uploadTimeoutMs: 2000,
+      fileCount: 3,
+      returnAfterSend: true,
+    }),
+    36000
   );
 });
 

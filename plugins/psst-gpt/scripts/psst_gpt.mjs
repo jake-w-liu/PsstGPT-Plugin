@@ -19,6 +19,7 @@ const DEFAULT_TIMEOUT_MS = 0;
 const DEFAULT_WAIT_CHUNK_MS = 90000;
 const POLL_INTERVAL_MS = 2000;
 const RESPONSE_STABLE_MS = 8000;
+const DEFAULT_RESPONSE_START_TIMEOUT_MS = 90 * 1000;
 const JXA_TIMEOUT_MS = 30000;
 const DEFAULT_BACKGROUND = true;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
@@ -922,9 +923,11 @@ async function relayPromptWithFileUploads({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   waitChunkMs = DEFAULT_WAIT_CHUNK_MS,
   uploadTimeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS,
+  responseStartTimeoutMs,
   statePath,
   relaySessionId,
   tags = [],
+  returnAfterSend = false,
 }) {
   if (typeof prompt !== "string" || !prompt.trim()) {
     throw codedError("PROMPT_MISSING", "A non-empty prompt is required.");
@@ -942,34 +945,86 @@ async function relayPromptWithFileUploads({
   const existingRecord = relaySessionId
     ? await findStoredAppSessionByRelayId(relaySessionId, statePath)
     : null;
+  const baseMessages = messagesForAppRelay(promptText, "", existingRecord?.messages);
   const directResult = await runDirectAxUploadRelay({
     prompt: promptText,
     filePaths: normalizedFilePaths,
     newChat: newChat !== false,
     timeoutMs,
     uploadTimeoutMs,
+    returnAfterSend: true,
   });
-  const state = directResult.state ?? {};
-  const assistantText = directResult.assistantText || extractAssistantTextFromAppState(state, promptText);
-  assertNoFatalAppBlocker(state);
-  const messages = messagesForAppRelay(promptText, assistantText, existingRecord?.messages);
-
-  const record = await upsertAppSessionRecord({
+  const initialState = directResult.state ?? {};
+  assertNoFatalAppBlocker(initialState);
+  const pendingRecord = await upsertAppSessionRecord({
     statePath,
     relaySessionId,
     prompt: promptText,
-    title: state.title ?? "ChatGPT",
-    mode: state.visibleModelLabel,
+    title: initialState.title ?? "ChatGPT",
+    mode: initialState.visibleModelLabel,
     background: false,
-    status: directResult.status ?? "complete",
+    status: "pending",
+    messages: baseMessages,
+    tags,
+  });
+
+  if (returnAfterSend) {
+    return appRelayResult({
+      status: "pending",
+      assistantText: "",
+      state: initialState,
+      record: pendingRecord,
+    });
+  }
+
+  const normalizedUploadTimeoutMs = normalizeOverallTimeoutMs(
+    uploadTimeoutMs,
+    DEFAULT_UPLOAD_TIMEOUT_MS
+  );
+  const normalizedResponseStartTimeoutMs = normalizeOverallTimeoutMs(
+    responseStartTimeoutMs,
+    normalizedUploadTimeoutMs > 0
+      ? Math.max(45_000, Math.min(normalizedUploadTimeoutMs, 120_000))
+      : DEFAULT_RESPONSE_START_TIMEOUT_MS
+  );
+  const result = await waitForAppAssistantResponseInChunks({
+    prompt: promptText,
+    timeoutMs,
+    waitChunkMs,
+    allowPending: false,
+    background: true,
+    responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
+    onPending: async (pendingResult) => {
+      await upsertAppSessionRecord({
+        statePath,
+        relaySessionId: pendingRecord.relaySessionId,
+        prompt: promptText,
+        title: pendingResult.state.title,
+        mode: pendingResult.state.visibleModelLabel || pendingRecord.mode,
+        background: false,
+        status: pendingResult.status,
+        messages: messagesForAppRelay(promptText, pendingResult.assistantText, baseMessages),
+        tags,
+      });
+    },
+  });
+  const messages = messagesForAppRelay(promptText, result.assistantText, baseMessages);
+  const record = await upsertAppSessionRecord({
+    statePath,
+    relaySessionId: pendingRecord.relaySessionId,
+    prompt: promptText,
+    title: result.state.title,
+    mode: result.state.visibleModelLabel || pendingRecord.mode,
+    background: false,
+    status: result.status,
     messages,
     tags,
   });
 
   return appRelayResult({
-    status: directResult.status ?? "complete",
-    assistantText,
-    state,
+    status: result.status,
+    assistantText: result.assistantText,
+    state: result.state,
     record,
   });
 }
@@ -980,6 +1035,7 @@ async function runDirectAxUploadRelay({
   newChat,
   timeoutMs,
   uploadTimeoutMs,
+  returnAfterSend = false,
 }) {
   const payload = {
     prompt,
@@ -989,6 +1045,7 @@ async function runDirectAxUploadRelay({
     uploadTimeoutMs,
     responseStableMs: RESPONSE_STABLE_MS,
     pollIntervalMs: POLL_INTERVAL_MS,
+    returnAfterSend,
   };
   let stdout = "";
   let stderr = "";
@@ -1001,6 +1058,7 @@ async function runDirectAxUploadRelay({
           timeoutMs,
           uploadTimeoutMs,
           fileCount: filePaths.length,
+          returnAfterSend,
         }),
         maxBuffer: 10 * 1024 * 1024,
       }
@@ -1085,10 +1143,17 @@ function calculateDirectAxRelayTimeoutMs({
   timeoutMs = DEFAULT_TIMEOUT_MS,
   uploadTimeoutMs = 2 * 60 * 1000,
   fileCount = 0,
+  returnAfterSend = false,
 } = {}) {
-  const normalizedResponseTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   const normalizedUploadTimeoutMs = normalizeOverallTimeoutMs(uploadTimeoutMs, DEFAULT_UPLOAD_TIMEOUT_MS);
   const normalizedFileCount = Math.max(1, Number(fileCount) || 0);
+  if (returnAfterSend) {
+    if (normalizedUploadTimeoutMs === 0) {
+      return 0;
+    }
+    return (normalizedUploadTimeoutMs * normalizedFileCount) + 30000;
+  }
+  const normalizedResponseTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   if (normalizedResponseTimeoutMs === 0 || normalizedUploadTimeoutMs === 0) {
     return 0;
   }
@@ -1979,6 +2044,7 @@ async function waitForAppAssistantResponseInChunks({
   waitChunkMs,
   allowPending,
   background,
+  responseStartTimeoutMs,
   onPending,
 }) {
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
@@ -1995,6 +2061,7 @@ async function waitForAppAssistantResponseInChunks({
       timeoutMs: chunkMs,
       allowPending: true,
       background,
+      responseStartTimeoutMs,
     });
 
     if (result.status === "complete") {
@@ -2025,12 +2092,18 @@ async function waitForAppAssistantResponse({
   timeoutMs,
   allowPending,
   background,
+  responseStartTimeoutMs = DEFAULT_RESPONSE_START_TIMEOUT_MS,
 }) {
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
+  const normalizedResponseStartTimeoutMs = normalizeOverallTimeoutMs(
+    responseStartTimeoutMs,
+    DEFAULT_RESPONSE_START_TIMEOUT_MS
+  );
   const start = Date.now();
   let lastState = null;
   let captureState = createAssistantCaptureState();
   let lastChangedAt = Date.now();
+  let responseStartedEver = false;
 
   while (normalizedTimeoutMs === 0 || Date.now() - start < normalizedTimeoutMs) {
     await sleep(POLL_INTERVAL_MS);
@@ -2050,6 +2123,26 @@ async function waitForAppAssistantResponse({
       lastChangedAt = Date.now();
     }
     captureState = nextCaptureState;
+    if (state.isAnswering || captureState.assistantText) {
+      responseStartedEver = true;
+    }
+    if (shouldFailResponseStart({
+      responseStartedEver,
+      state,
+      prompt,
+      captureState,
+      stableForMs: Date.now() - lastChangedAt,
+      responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
+    })) {
+      throw codedError(
+        "PSST_GPT_RESPONSE_NOT_STARTED",
+        "ChatGPT accepted the prompt but never started answering.",
+        {
+          captureState,
+          lastState: state,
+        }
+      );
+    }
 
     if (
       captureState.incomplete &&
@@ -2104,6 +2197,33 @@ function isAppResponseCompleteSnapshot({ assistantText, textStableForMs, isAnswe
     !isAnswering &&
     assistantCaptureCanComplete(captureState)
   );
+}
+
+function responseAcceptedFromAppState(state = {}, prompt = "", captureState = createAssistantCaptureState()) {
+  if (captureState.promptVisibleEver) {
+    return true;
+  }
+  const composerValue = normalizeWhitespace(String(state.composerValue ?? ""));
+  const normalizedPrompt = normalizeWhitespace(String(prompt ?? ""));
+  if (!composerValue) {
+    return true;
+  }
+  return composerValue !== normalizedPrompt;
+}
+
+function shouldFailResponseStart({
+  responseStartedEver,
+  state,
+  prompt,
+  captureState,
+  stableForMs,
+  responseStartTimeoutMs,
+} = {}) {
+  return !responseStartedEver &&
+    responseStartTimeoutMs > 0 &&
+    responseAcceptedFromAppState(state, prompt, captureState) &&
+    !captureState.incomplete &&
+    stableForMs >= responseStartTimeoutMs;
 }
 
 function extractAssistantTextFromAppState(state = {}, prompt = "") {
@@ -3648,6 +3768,8 @@ export const __testing = {
   buildAccessibilityReminderMessage,
   isAccessibilityError,
   shouldShowAccessibilityReminder,
+  responseAcceptedFromAppState,
+  shouldFailResponseStart,
   buildVerifiedUploadAuditPrompt,
   parseUploadVerificationHeader,
 };

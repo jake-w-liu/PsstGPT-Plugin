@@ -1740,6 +1740,10 @@ async function collectAuditFiles(root, { maxFileBytes, maxTotalBytes }) {
     for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
       const absolutePath = path.join(dir, entry.name);
       const relativePath = path.relative(root, absolutePath);
+      if (/[\r\n]/.test(relativePath)) {
+        skipped.push({ path: relativePath, reason: "path contains a newline" });
+        continue;
+      }
       if (entry.isDirectory()) {
         if (AUDIT_EXCLUDED_DIRS.has(entry.name)) {
           skipped.push({ path: relativePath, reason: "excluded directory" });

@@ -1003,6 +1003,27 @@ test("createPsstGPTAuditBundle skips unreadable text files instead of aborting",
   }
 });
 
+test("createPsstGPTAuditBundle skips newline-containing paths", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-newline-"));
+  try {
+    await writeFile(path.join(root, "bad\nname.js"), "console.log('bad');\n", "utf8");
+    await writeFile(path.join(root, "good.js"), "console.log('good');\n", "utf8");
+
+    const bundle = await createPsstGPTAuditBundle({
+      root,
+      maxFileBytes: 1024,
+      maxTotalBytes: 4096,
+    });
+
+    assert.deepEqual(bundle.files.map((file) => file.path), ["good.js"]);
+    assert.equal(bundle.skipped.some((entry) =>
+      entry.path === "bad\nname.js" && /path contains a newline/i.test(entry.reason)
+    ), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("createPsstGPTAuditBundle fails without leaving output when no auditable files exist", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-empty-"));
   const outputDir = path.join(os.tmpdir(), `psst-gpt-audit-empty-out-${Date.now()}`);

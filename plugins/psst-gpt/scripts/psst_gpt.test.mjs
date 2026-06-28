@@ -1020,6 +1020,40 @@ test("createPsstGPTAuditBundle fails without leaving output when no auditable fi
   }
 });
 
+test("createPsstGPTAuditBundle rejects an outputDir that is an existing file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-output-file-"));
+  const outputDir = path.join(root, "bundle-output");
+  try {
+    await writeFile(path.join(root, "a.js"), "console.log('ok');\n", "utf8");
+    await writeFile(outputDir, "not a directory\n", "utf8");
+
+    await assert.rejects(
+      createPsstGPTAuditBundle({ root, outputDir }),
+      { code: "PSST_GPT_AUDIT_OUTPUT_DIR_INVALID" }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createPsstGPTAuditBundle rejects an outputDir that is not writable", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-audit-output-dir-"));
+  const outputDir = path.join(root, "bundle-output");
+  try {
+    await writeFile(path.join(root, "a.js"), "console.log('ok');\n", "utf8");
+    await mkdir(outputDir, { recursive: true });
+    await chmod(outputDir, 0o555);
+
+    await assert.rejects(
+      createPsstGPTAuditBundle({ root, outputDir }),
+      { code: "PSST_GPT_AUDIT_OUTPUT_DIR_INVALID" }
+    );
+    await chmod(outputDir, 0o755);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("uploadAuditPsstGPT preflights before creating the upload bundle", async () => {
   let bundleFactoryCalls = 0;
   await assert.rejects(
@@ -1135,6 +1169,40 @@ test("createPsstGPTUploadBundle fails without leaving output when no uploadable 
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(outputDir, { recursive: true, force: true });
+  }
+});
+
+test("createPsstGPTUploadBundle rejects an outputDir that is an existing file", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-output-file-"));
+  const outputDir = path.join(root, "bundle-output");
+  try {
+    await writeFile(path.join(root, "a.js"), "console.log('ok');\n", "utf8");
+    await writeFile(outputDir, "not a directory\n", "utf8");
+
+    await assert.rejects(
+      createPsstGPTUploadBundle({ root, outputDir }),
+      { code: "PSST_GPT_UPLOAD_OUTPUT_DIR_INVALID" }
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("createPsstGPTUploadBundle rejects an outputDir that is not writable", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-output-dir-"));
+  const outputDir = path.join(root, "bundle-output");
+  try {
+    await writeFile(path.join(root, "a.js"), "console.log('ok');\n", "utf8");
+    await mkdir(outputDir, { recursive: true });
+    await chmod(outputDir, 0o555);
+
+    await assert.rejects(
+      createPsstGPTUploadBundle({ root, outputDir }),
+      { code: "PSST_GPT_UPLOAD_OUTPUT_DIR_INVALID" }
+    );
+    await chmod(outputDir, 0o755);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

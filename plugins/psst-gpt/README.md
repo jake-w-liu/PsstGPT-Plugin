@@ -97,6 +97,7 @@ This mode is still standalone PsstGPT. It uses the ChatGPT macOS app's own Uploa
 If upload bundling finds no eligible files, it now fails with `PSST_GPT_UPLOAD_BUNDLE_EMPTY` without leaving a stale output directory behind.
 Unreadable files are skipped with a recorded reason instead of aborting the whole upload bundle.
 If you pass a previously created bundle object back into PsstGPT, its referenced paths must still be readable, and upload bundle output directories must still be writable, or PsstGPT fails explicitly with `PSST_GPT_AUDIT_BUNDLE_INVALID` or `PSST_GPT_UPLOAD_BUNDLE_INVALID`.
+If you pass `outputDir`, it must either not exist yet or already be a readable, writable directory. Existing files at that path now fail explicitly with `PSST_GPT_AUDIT_OUTPUT_DIR_INVALID` or `PSST_GPT_UPLOAD_OUTPUT_DIR_INVALID`.
 
 Main relay commands wait indefinitely by default for ChatGPT to finish. Pass `timeoutMs` only when you want to cap a run yourself. `timeoutMs: 0` explicitly keeps the response wait unbounded. The `poll` helper remains the bounded check-in path for pending sessions, and uploads still use `uploadTimeoutMs` for the file-picker wait.
 

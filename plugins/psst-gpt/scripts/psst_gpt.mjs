@@ -514,9 +514,7 @@ export async function createPsstGPTAuditBundle(options = {}) {
 
   const createdAt = new Date().toISOString();
   const bundleId = `psst-gpt-audit-${createdAt.replace(/[:.]/g, "-")}`;
-  const bundleDir = outputDir
-    ? path.resolve(outputDir)
-    : path.join(os.tmpdir(), "psst-gpt", "audit-bundles", bundleId);
+  const bundleDirFallback = path.join(os.tmpdir(), "psst-gpt", "audit-bundles", bundleId);
 
   const { files, skipped } = await collectAuditFiles(resolvedRoot, {
     maxFileBytes,
@@ -529,9 +527,12 @@ export async function createPsstGPTAuditBundle(options = {}) {
       { root: resolvedRoot, skipped }
     );
   }
-
-  const bundleDirExisted = await fileExists(bundleDir);
-  await mkdir(bundleDir, { recursive: true });
+  const { bundleDir, bundleDirExisted } = await ensureBundleOutputDir({
+    outputDir,
+    fallbackDir: bundleDirFallback,
+    invalidCode: "PSST_GPT_AUDIT_OUTPUT_DIR_INVALID",
+    invalidLabel: "audit bundle outputDir",
+  });
   const markdown = formatAuditBundleMarkdown({
     bundleId,
     createdAt,
@@ -657,9 +658,7 @@ export async function createPsstGPTUploadBundle(options = {}) {
   );
   const createdAt = new Date().toISOString();
   const bundleId = `psst-gpt-upload-${createdAt.replace(/[:.]/g, "-")}`;
-  const bundleDir = outputDir
-    ? path.resolve(outputDir)
-    : path.join(os.tmpdir(), "psst-gpt", "upload-bundles", bundleId);
+  const bundleDirFallback = path.join(os.tmpdir(), "psst-gpt", "upload-bundles", bundleId);
 
   const { files, skipped } = await collectUploadFiles(resolvedRoot, {
     includeDefaultExcludes,
@@ -674,8 +673,12 @@ export async function createPsstGPTUploadBundle(options = {}) {
       { root: resolvedRoot, skipped }
     );
   }
-  const bundleDirExisted = await fileExists(bundleDir);
-  await mkdir(bundleDir, { recursive: true });
+  const { bundleDir, bundleDirExisted } = await ensureBundleOutputDir({
+    outputDir,
+    fallbackDir: bundleDirFallback,
+    invalidCode: "PSST_GPT_UPLOAD_OUTPUT_DIR_INVALID",
+    invalidLabel: "upload bundle outputDir",
+  });
 
   const archiveName = "source-archive.zip";
   const archivePath = path.join(bundleDir, archiveName);
@@ -2056,6 +2059,55 @@ async function validateProvidedUploadBundle(bundle) {
     ...bundle,
     attachmentPaths,
   };
+}
+
+async function ensureBundleOutputDir({
+  outputDir,
+  fallbackDir,
+  invalidCode,
+  invalidLabel,
+}) {
+  const bundleDir = outputDir ? path.resolve(outputDir) : fallbackDir;
+  let bundleDirExisted = false;
+
+  try {
+    const bundleDirStat = await stat(bundleDir);
+    if (!bundleDirStat.isDirectory()) {
+      throw codedError(
+        invalidCode,
+        `Provided ${invalidLabel} is not a directory: ${bundleDir}`,
+        { outputDir: bundleDir }
+      );
+    }
+    await access(bundleDir, FS_CONSTANTS.R_OK | FS_CONSTANTS.W_OK);
+    bundleDirExisted = true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      bundleDirExisted = false;
+    } else if (error?.code === invalidCode) {
+      throw error;
+    } else {
+      throw codedError(
+        invalidCode,
+        `Provided ${invalidLabel} is not readable and writable: ${bundleDir}`,
+        { outputDir: bundleDir, cause: error }
+      );
+    }
+  }
+
+  if (!bundleDirExisted) {
+    try {
+      await mkdir(bundleDir, { recursive: true });
+    } catch (error) {
+      throw codedError(
+        invalidCode,
+        `Could not create ${invalidLabel}: ${bundleDir}`,
+        { outputDir: bundleDir, cause: error }
+      );
+    }
+  }
+
+  return { bundleDir, bundleDirExisted };
 }
 
 function chunkTextByLines(text, maxChars) {

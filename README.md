@@ -159,6 +159,8 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
 
 `doctor` verifies whether this Mac/session can currently do strict-background text relay, foreground upload relay, both, or neither. The foreground upload probe may briefly bring ChatGPT to the front because the native upload path is not background-only, then restore the previous frontmost app after the probe.
 
+The foreground upload probe and upload preflight now use the same direct Swift Accessibility backend as the real upload relay, so foreground readiness no longer depends on the stricter JXA text-relay probe.
+
 `audit` and `upload-audit` now run their own relay preflight before they build local bundles, so a broken ChatGPT Accessibility session fails early instead of spending time generating stale bundle output first.
 
 For long tasks, start first and poll later:

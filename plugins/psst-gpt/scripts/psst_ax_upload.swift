@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 
 struct Input: Decodable {
+    let action: String?
     let prompt: String
     let filePaths: [String]
     let newChat: Bool?
@@ -12,6 +13,7 @@ struct Input: Decodable {
     let pollIntervalMs: Double?
     let responseStartTimeoutMs: Double?
     let returnAfterSend: Bool?
+    let restoreFrontmostOnExit: Bool?
 }
 
 struct NodeRecord {
@@ -208,6 +210,13 @@ func key(_ code: CGKeyCode, flags: CGEventFlags = []) {
     up.flags = flags
     up.post(tap: .cghidEventTap)
     sleepMs(80)
+}
+
+func restoreFrontmostApplication(_ app: NSRunningApplication?) {
+    guard let app else { return }
+    guard app.bundleIdentifier != "com.openai.chat" else { return }
+    _ = app.activate()
+    sleepMs(200)
 }
 
 struct PasteboardSnapshot {
@@ -517,9 +526,33 @@ func pressSendAndVerify(_ record: NodeRecord, appElement: AXUIElement, prompt: S
     }
 }
 
-func labelsContainUploadNeedle(_ labels: [String], fileName: String, prefix: String) -> Bool {
-    let haystack = labels.joined(separator: "\n").lowercased()
-    return haystack.contains(fileName) || haystack.contains(prefix)
+func labelMatchesUploadedFile(_ label: String, fileName: String) -> Bool {
+    let normalizedLabel = normalize(label).lowercased()
+    let normalizedFileName = normalize(fileName).lowercased()
+    if normalizedLabel.contains(normalizedFileName) {
+        return true
+    }
+
+    let fileURL = URL(fileURLWithPath: normalizedFileName)
+    let stem = fileURL.deletingPathExtension().lastPathComponent
+    let ext = fileURL.pathExtension
+    guard !stem.isEmpty else {
+        return false
+    }
+
+    let escapedStem = NSRegularExpression.escapedPattern(for: stem)
+    let pattern: String
+    if ext.isEmpty {
+        pattern = #"\b\#(escapedStem)(?:\s*\(\d+\))?\b"#
+    } else {
+        let escapedExt = NSRegularExpression.escapedPattern(for: ext)
+        pattern = #"\b\#(escapedStem)(?:\s*\(\d+\))?\.\#(escapedExt)\b"#
+    }
+    return normalizedLabel.range(of: pattern, options: .regularExpression) != nil
+}
+
+func labelsContainUploadNeedle(_ labels: [String], fileName: String) -> Bool {
+    labels.contains { labelMatchesUploadedFile($0, fileName: fileName) }
 }
 
 func uploadDialogAcceptButton(_ appElement: AXUIElement) -> NodeRecord? {
@@ -692,7 +725,7 @@ func uploadFile(_ filePath: String, appElement: AXUIElement, uploadTimeoutMs: Do
             composerMissingAfterDialogAt = nil
             let attachmentLabels = composerAttachmentLabels(window, composerRecord: currentComposer)
             return !dialogVisible &&
-                labelsContainUploadNeedle(attachmentLabels, fileName: fileName, prefix: prefix) ? true : nil
+                labelsContainUploadNeedle(attachmentLabels, fileName: fileName) ? true : nil
         }
         guard !dialogVisible else { return nil }
         if composerMissingAfterDialogAt == nil {
@@ -747,7 +780,59 @@ func sendIfNeeded(_ appElement: AXUIElement, prompt: String) throws {
     }
 }
 
+func runProbe(_ input: Input) throws -> [String: Any] {
+    let frontmostBefore = input.restoreFrontmostOnExit == true
+        ? NSWorkspace.shared.frontmostApplication
+        : nil
+    defer {
+        if input.restoreFrontmostOnExit == true {
+            restoreFrontmostApplication(frontmostBefore)
+        }
+    }
+
+    let appElement = try chatGPTAppElement()
+    let probeTimeoutMs = normalizeTimeoutMs(input.uploadTimeoutMs, fallback: 15_000)
+    let (window, _) = try waitForComposer(appElement, timeoutMs: probeTimeoutMs)
+    return [
+        "ok": true,
+        "status": "ready",
+        "state": snapshot(window),
+    ]
+}
+
+func runSnapshot(_ input: Input) throws -> [String: Any] {
+    let frontmostBefore = input.restoreFrontmostOnExit == true
+        ? NSWorkspace.shared.frontmostApplication
+        : nil
+    defer {
+        if input.restoreFrontmostOnExit == true {
+            restoreFrontmostApplication(frontmostBefore)
+        }
+    }
+
+    let appElement = try chatGPTAppElement()
+    let window = try chatWindow(appElement)
+    return [
+        "ok": true,
+        "status": "ready",
+        "state": snapshot(window),
+    ]
+}
+
 func run(_ input: Input) throws -> [String: Any] {
+    let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    let trustOptions = [trustPromptKey: true] as CFDictionary
+    guard AXIsProcessTrustedWithOptions(trustOptions) else {
+        throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
+    }
+
+    if input.action == "probe" {
+        return try runProbe(input)
+    }
+    if input.action == "snapshot" {
+        return try runSnapshot(input)
+    }
+
     guard !normalize(input.prompt).isEmpty else {
         throw AxUploadError.message("Prompt is empty")
     }
@@ -755,11 +840,6 @@ func run(_ input: Input) throws -> [String: Any] {
         guard FileManager.default.fileExists(atPath: filePath) else {
             throw AxUploadError.message("Upload file does not exist: \(filePath)")
         }
-    }
-    let trustPromptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
-    let trustOptions = [trustPromptKey: true] as CFDictionary
-    guard AXIsProcessTrustedWithOptions(trustOptions) else {
-        throw AxUploadError.message("macOS Accessibility automation is not enabled for /usr/bin/swift")
     }
 
     let appElement = try chatGPTAppElement()

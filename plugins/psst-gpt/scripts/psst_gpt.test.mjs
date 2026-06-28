@@ -385,6 +385,32 @@ test("foreground recovery is only attempted for upload waits on recoverable back
   );
 });
 
+test("foreground upload waits switch to the direct AX state reader after recovery", () => {
+  assert.equal(
+    __testing.shouldUseDirectAxStateReaderForWait({
+      allowForegroundRecovery: true,
+      background: false,
+    }),
+    true
+  );
+
+  assert.equal(
+    __testing.shouldUseDirectAxStateReaderForWait({
+      allowForegroundRecovery: true,
+      background: true,
+    }),
+    false
+  );
+
+  assert.equal(
+    __testing.shouldUseDirectAxStateReaderForWait({
+      allowForegroundRecovery: false,
+      background: false,
+    }),
+    false
+  );
+});
+
 test("unsupported PsstGPT options fail explicitly", () => {
   assert.throws(
     () => __testing.assertSupportedAppRelayOptions({
@@ -799,17 +825,19 @@ test("doctor summary reports degraded readiness when only one relay path is avai
   ]);
 });
 
-test("foreground upload preflight requests focus restoration", async () => {
+test("foreground upload preflight uses the direct AX probe and restores focus", async () => {
   let capturedOptions = null;
   await __testing.ensureForegroundUploadRelayReady({
-    ensureReady: async (options) => {
+    probe: async (options) => {
       capturedOptions = options;
+      return {
+        title: "ChatGPT",
+        hasComposer: true,
+        background: false,
+      };
     },
   });
   assert.deepEqual(capturedOptions, {
-    background: false,
-    verify: true,
-    allowWindowRecovery: true,
     restoreFrontmostOnExit: true,
   });
 });

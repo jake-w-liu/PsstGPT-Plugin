@@ -83,6 +83,8 @@ node plugins/psst-gpt/scripts/psst_gpt.mjs \
 
 The foreground upload probe may briefly bring ChatGPT to the foreground because the native file-picker path is not strict-background, then restore the previous frontmost app after the probe.
 
+The foreground upload probe and upload preflight now use the same direct Swift Accessibility backend as the real upload relay, so foreground readiness no longer depends on the stricter JXA text-relay probe.
+
 `audit` and `upload-audit` also preflight ChatGPT before they build local bundle output, so a shell-only or missing-window session fails early instead of wasting time packaging files first.
 
 The robust task router chooses the transport automatically:

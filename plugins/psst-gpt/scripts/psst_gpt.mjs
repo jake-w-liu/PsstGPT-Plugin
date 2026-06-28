@@ -24,6 +24,7 @@ const DEFAULT_RESPONSE_START_TIMEOUT_MS = 90 * 1000;
 const JXA_TIMEOUT_MS = 30000;
 const DEFAULT_BACKGROUND = true;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+const DIRECT_AX_PROBE_TIMEOUT_MS = 30 * 1000;
 // Rate-limit setup dialogs so missing permissions do not interrupt every run.
 const ACCESSIBILITY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS = 25000;
@@ -256,6 +257,7 @@ export async function doctorPsstGPT() {
     background: false,
     allowWindowRecovery: true,
     message: "Foreground upload relay is ready.",
+    ensureReady: ensureForegroundUploadRelayReady,
   }));
 
   return buildDoctorResult(checks);
@@ -1071,11 +1073,7 @@ async function relayPromptWithFileUploads({
     );
   }
 
-  await ensureChatGPTAppReady({
-    background: false,
-    verify: true,
-    allowWindowRecovery: true,
-  });
+  await ensureForegroundUploadRelayReady();
   const promptText = prompt.trim();
   const existingRecord = relaySessionId
     ? await findStoredAppSessionByRelayId(relaySessionId, statePath)
@@ -1186,6 +1184,65 @@ async function runDirectAxUploadRelay({
     pollIntervalMs: POLL_INTERVAL_MS,
     returnAfterSend,
   };
+  return runDirectAxHelper(payload, {
+    timeoutMs: calculateDirectAxRelayTimeoutMs({
+      timeoutMs,
+      uploadTimeoutMs,
+      fileCount: filePaths.length,
+      returnAfterSend,
+    }),
+    genericFailureCode: "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
+    genericFailureMessage: "ChatGPT app upload relay failed in the direct Accessibility backend.",
+    invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
+    invalidResponseMessage: "The direct Accessibility upload backend returned invalid JSON.",
+  });
+}
+
+async function probeDirectAxUploadRelayReady({
+  restoreFrontmostOnExit = true,
+  timeoutMs = DIRECT_AX_PROBE_TIMEOUT_MS,
+} = {}) {
+  return readDirectAxPsstGPTState({
+    restoreFrontmostOnExit,
+    timeoutMs,
+    genericFailureCode: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
+    genericFailureMessage: "ChatGPT app foreground upload readiness probe failed in the direct Accessibility backend.",
+    invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
+    invalidResponseMessage: "The direct Accessibility foreground probe returned invalid JSON.",
+  });
+}
+
+async function readDirectAxPsstGPTState({
+  restoreFrontmostOnExit = false,
+  timeoutMs = DIRECT_AX_PROBE_TIMEOUT_MS,
+  genericFailureCode = "PSST_GPT_DIRECT_AX_STATE_FAILED",
+  genericFailureMessage = "ChatGPT app foreground state snapshot failed in the direct Accessibility backend.",
+  invalidResponseCode = "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
+  invalidResponseMessage = "The direct Accessibility state snapshot returned invalid JSON.",
+} = {}) {
+  const result = await runDirectAxHelper({
+    action: "snapshot",
+    prompt: "",
+    filePaths: [],
+    uploadTimeoutMs: timeoutMs,
+    restoreFrontmostOnExit,
+  }, {
+    timeoutMs,
+    genericFailureCode,
+    genericFailureMessage,
+    invalidResponseCode,
+    invalidResponseMessage,
+  });
+  return result?.state ?? result;
+}
+
+async function runDirectAxHelper(payload, {
+  timeoutMs,
+  genericFailureCode,
+  genericFailureMessage,
+  invalidResponseCode,
+  invalidResponseMessage,
+}) {
   let stdout = "";
   let stderr = "";
   try {
@@ -1193,12 +1250,7 @@ async function runDirectAxUploadRelay({
       "/usr/bin/swift",
       [DIRECT_AX_UPLOAD_HELPER_PATH, JSON.stringify(payload)],
       {
-        timeout: calculateDirectAxRelayTimeoutMs({
-          timeoutMs,
-          uploadTimeoutMs,
-          fileCount: filePaths.length,
-          returnAfterSend,
-        }),
+        timeout: timeoutMs,
         maxBuffer: 10 * 1024 * 1024,
       }
     ));
@@ -1207,8 +1259,8 @@ async function runDirectAxUploadRelay({
       parseDirectAxHelperJson(error?.stderr || stderr);
     if (failure) {
       const codedFailure = codedError(
-        failure.code || "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
-        failure.message || "The direct Accessibility upload backend failed.",
+        failure.code || genericFailureCode,
+        failure.message || genericFailureMessage,
         {
           stdout: error?.stdout || stdout,
           stderr: error?.stderr || stderr,
@@ -1223,8 +1275,8 @@ async function runDirectAxUploadRelay({
       throw codedFailure;
     }
     throw codedError(
-      "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
-      "ChatGPT app upload relay failed in the direct Accessibility backend.",
+      genericFailureCode,
+      genericFailureMessage,
       {
         stdout: error?.stdout || stdout,
         stderr: error?.stderr || stderr,
@@ -1236,16 +1288,16 @@ async function runDirectAxUploadRelay({
   const parsed = parseDirectAxHelperJson(stdout);
   if (!parsed) {
     throw codedError(
-      "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
-      "The direct Accessibility upload backend returned invalid JSON.",
+      invalidResponseCode,
+      invalidResponseMessage,
       { stdout, stderr }
     );
   }
 
   if (!parsed?.ok) {
     const error = codedError(
-      parsed?.code || "PSST_GPT_DIRECT_AX_UPLOAD_FAILED",
-      parsed?.message || "The direct Accessibility upload backend failed.",
+      parsed?.code || genericFailureCode,
+      parsed?.message || genericFailureMessage,
       { stdout, stderr, parsed }
     );
     if (isAccessibilityError(error)) {
@@ -2504,13 +2556,11 @@ async function ensureStrictBackgroundRelayReady({ ensureReady = ensureChatGPTApp
   });
 }
 
-async function ensureForegroundUploadRelayReady({ ensureReady = ensureChatGPTAppReady } = {}) {
-  await ensureReady({
-    background: false,
-    verify: true,
-    allowWindowRecovery: true,
-    restoreFrontmostOnExit: true,
-  });
+async function ensureForegroundUploadRelayReady({
+  probe = probeDirectAxUploadRelayReady,
+  restoreFrontmostOnExit = true,
+} = {}) {
+  return probe({ restoreFrontmostOnExit });
 }
 
 async function assertChatGPTAppInstalled() {
@@ -2616,10 +2666,9 @@ async function waitForAppAssistantResponse({
     await sleep(POLL_INTERVAL_MS);
     let state;
     try {
-      state = await readPsstGPTState({
+      state = await readStateForAssistantWait({
         background: effectiveBackground,
-        ensure: false,
-        allowForeground: effectiveBackground === false,
+        allowForegroundRecovery,
       });
     } catch (error) {
       if (!shouldAttemptForegroundRecoveryForWait({
@@ -2629,16 +2678,10 @@ async function waitForAppAssistantResponse({
       })) {
         throw error;
       }
-      await ensureChatGPTAppReady({
-        background: false,
-        verify: true,
-        allowWindowRecovery: true,
-      });
       effectiveBackground = false;
-      state = await readPsstGPTState({
+      state = await readStateForAssistantWait({
         background: false,
-        ensure: false,
-        allowForeground: true,
+        allowForegroundRecovery: true,
       });
     }
     assertNoFatalAppBlocker(state);
@@ -2713,6 +2756,20 @@ async function waitForAppAssistantResponse({
   );
 }
 
+async function readStateForAssistantWait({
+  background,
+  allowForegroundRecovery = false,
+} = {}) {
+  if (shouldUseDirectAxStateReaderForWait({ background, allowForegroundRecovery })) {
+    return readDirectAxPsstGPTState({ restoreFrontmostOnExit: false });
+  }
+  return readPsstGPTState({
+    background,
+    ensure: false,
+    allowForeground: background === false,
+  });
+}
+
 function isAppResponseCompleteSnapshot({ assistantText, textStableForMs, isAnswering, captureState }) {
   return Boolean(
     assistantText?.trim() &&
@@ -2763,6 +2820,13 @@ function shouldAttemptForegroundRecoveryForWait({
   return allowForegroundRecovery === true &&
     background !== false &&
     isRecoverableBackgroundAppStateError(error);
+}
+
+function shouldUseDirectAxStateReaderForWait({
+  background = true,
+  allowForegroundRecovery = false,
+} = {}) {
+  return allowForegroundRecovery === true && background === false;
 }
 
 function extractAssistantTextFromAppState(state = {}, prompt = "") {
@@ -4737,6 +4801,7 @@ export const __testing = {
   responseAcceptedFromAppState,
   shouldFailResponseStart,
   shouldAttemptForegroundRecoveryForWait,
+  shouldUseDirectAxStateReaderForWait,
   persistUploadAuditFailure,
   buildVerifiedUploadAuditPrompt,
   parseUploadVerificationHeader,

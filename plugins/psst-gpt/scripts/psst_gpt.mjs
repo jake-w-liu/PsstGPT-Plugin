@@ -100,6 +100,7 @@ const AUDIT_EXCLUDED_DIRS = new Set([
 ]);
 const UPLOAD_EXCLUDED_DIRS = new Set([
   ...AUDIT_EXCLUDED_DIRS,
+  ".agents",
   ".arc",
   ".parcel-cache",
   ".svelte-kit",

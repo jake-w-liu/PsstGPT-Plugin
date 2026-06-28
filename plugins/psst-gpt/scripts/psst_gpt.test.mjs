@@ -791,11 +791,13 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-test-"));
   try {
     await mkdir(path.join(root, "src"), { recursive: true });
+    await mkdir(path.join(root, ".agents", "plugins"), { recursive: true });
     await mkdir(path.join(root, ".arc"), { recursive: true });
     await mkdir(path.join(root, "node_modules", "pkg"), { recursive: true });
     await writeFile(path.join(root, "src", "a.js"), `${"a".repeat(900)}\n`, "utf8");
     await writeFile(path.join(root, "src", "b.js"), `${"b".repeat(900)}\n`, "utf8");
     await writeFile(path.join(root, "README.md"), "# Demo\n", "utf8");
+    await writeFile(path.join(root, ".agents", "plugins", "marketplace.json"), "{}\n", "utf8");
     await writeFile(path.join(root, ".arc", "telemetry.jsonl"), "ignored-agent-state\n", "utf8");
     await writeFile(path.join(root, "node_modules", "pkg", "index.js"), "ignored\n", "utf8");
 
@@ -810,7 +812,9 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
     assert.equal(bundle.files.some((file) => file.path === "src/a.js"), true);
     assert.equal(bundle.files.some((file) => file.path === "src/b.js"), true);
     assert.equal(bundle.files.some((file) => file.path === "README.md"), true);
+    assert.equal(bundle.files.some((file) => file.path === ".agents/plugins/marketplace.json"), false);
     assert.equal(bundle.skipped.some((entry) => entry.path === "node_modules"), true);
+    assert.equal(bundle.skipped.some((entry) => entry.path === ".agents"), true);
     assert.equal(bundle.skipped.some((entry) => entry.path === ".arc"), true);
     assert.equal(bundle.shards.length, 1);
     assert.equal(bundle.archives.length, 1);
@@ -823,6 +827,7 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
     assert.match(archiveListing.stdout, /src\/a\.js/);
     assert.match(archiveListing.stdout, /src\/b\.js/);
     assert.doesNotMatch(archiveListing.stdout, /upload-manifest\.json/);
+    assert.doesNotMatch(archiveListing.stdout, /\.agents\/plugins\/marketplace\.json/);
     assert.doesNotMatch(archiveListing.stdout, /\.arc\/telemetry\.jsonl/);
   } finally {
     await rm(root, { recursive: true, force: true });

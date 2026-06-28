@@ -21,7 +21,9 @@ const DEFAULT_WAIT_CHUNK_MS = 90000;
 const POLL_INTERVAL_MS = 2000;
 const RESPONSE_STABLE_MS = 8000;
 const DEFAULT_RESPONSE_START_TIMEOUT_MS = 90 * 1000;
-const JXA_TIMEOUT_MS = 30000;
+// Use an unlimited JXA timeout so long-thinking prompts are not killed by the
+// bridge before the app-level wait loop decides whether to continue.
+const JXA_TIMEOUT_MS = 0;
 const DEFAULT_BACKGROUND = true;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
 const DEFAULT_UPLOAD_RESPONSE_START_TIMEOUT_MS = 0;
@@ -3556,7 +3558,7 @@ function firstUsableWindow(process, requireComposer) {
 }
 
 function findComposerInWindow(window) {
-  return firstNode(descendants(window), function(node) {
+  return firstNode(descendantsForComposerLookup(window), function(node) {
     return safeString(function() { return node.role(); }) === "AXTextArea";
   });
 }
@@ -4091,7 +4093,7 @@ function pressElement(element) {
 function waitForComposer(window, timeoutMs) {
   var deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    var nodes = descendants(window);
+    var nodes = descendantsForComposerLookup(window);
     var composer = firstNode(nodes, function(node) {
       return safeString(function() { return node.role(); }) === "AXTextArea";
     });
@@ -4106,8 +4108,6 @@ function waitForComposer(window, timeoutMs) {
 function descendants(root) {
   var output = [];
   var stack = [root];
-  var seen = {};
-  seen[nodeTraversalSignature(root)] = true;
   while (stack.length > 0 && output.length < 4000) {
     var current = stack.pop();
     var children = [];
@@ -4118,11 +4118,6 @@ function descendants(root) {
     }
     for (var outIndex = 0; outIndex < children.length; outIndex += 1) {
       var child = children[outIndex];
-      var signature = nodeTraversalSignature(child);
-      if (seen[signature]) {
-        continue;
-      }
-      seen[signature] = true;
       output.push(child);
       stack.push(child);
     }
@@ -4130,19 +4125,24 @@ function descendants(root) {
   return output;
 }
 
-function nodeTraversalSignature(node) {
-  var position = pointFromArray(safeArray(function() { return node.position(); }));
-  var size = sizeFromArray(safeArray(function() { return node.size(); }));
-  return [
-    safeString(function() { return node.role(); }),
-    safeString(function() { return node.subrole(); }),
-    safeString(function() { return node.name(); }),
-    safeString(function() { return node.description(); }),
-    safeString(function() { return node.value(); }),
-    safeString(function() { return node.enabled(); }),
-    position ? position.x + "," + position.y : "",
-    size ? size.width + "x" + size.height : "",
-  ].join("|");
+function descendantsForComposerLookup(root) {
+  var output = [];
+  var stack = [root];
+  while (stack.length > 0 && output.length < 4000) {
+    var current = stack.pop();
+    var children = [];
+    try {
+      children = current.uiElements();
+    } catch (error) {
+      children = [];
+    }
+    for (var outIndex = 0; outIndex < children.length; outIndex += 1) {
+      var child = children[outIndex];
+      output.push(child);
+      stack.push(child);
+    }
+  }
+  return output;
 }
 
 function firstNode(nodes, predicate) {

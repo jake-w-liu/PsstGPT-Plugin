@@ -10,6 +10,7 @@ struct Input: Decodable {
     let uploadTimeoutMs: Double?
     let responseStableMs: Double?
     let pollIntervalMs: Double?
+    let responseStartTimeoutMs: Double?
 }
 
 struct NodeRecord {
@@ -37,10 +38,12 @@ struct AssistantCaptureState {
 
 enum AxUploadError: Error, CustomStringConvertible {
     case message(String)
+    case coded(String, String)
 
     var description: String {
         switch self {
         case .message(let value): return value
+        case .coded(_, let message): return message
         }
     }
 }
@@ -256,12 +259,13 @@ func chatGPTAppElement() throws -> AXUIElement {
 
 func chatWindow(_ appElement: AXUIElement) throws -> AXUIElement {
     let windows: [AXUIElement] = attr(appElement, kAXWindowsAttribute) ?? []
-    for window in windows {
+    let realWindows = windows.filter { stringAttr($0, kAXRoleAttribute) == kAXWindowRole }
+    for window in realWindows {
         if descendants(window, limit: 1_000).contains(where: { stringAttr($0, kAXRoleAttribute) == kAXTextAreaRole }) {
             return window
         }
     }
-    if let first = windows.first { return first }
+    if let first = realWindows.first { return first }
     throw AxUploadError.message("No ChatGPT window is available")
 }
 
@@ -437,6 +441,14 @@ func normalizeAssistantText(_ text: String) -> String {
         .trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
+func responseAccepted(_ state: [String: Any], prompt: String, captureState: AssistantCaptureState) -> Bool {
+    if captureState.promptVisibleEver { return true }
+    let composerValue = normalize(String(describing: state["composerValue"] ?? ""))
+    let normalizedPrompt = normalize(prompt)
+    if composerValue.isEmpty { return true }
+    return composerValue != normalizedPrompt
+}
+
 func chooseNewChat(_ appElement: AXUIElement) throws {
     let window = try chatWindow(appElement)
     if let button = firstRecord(window, role: kAXButtonRole, matching: "^New chat$") {
@@ -448,10 +460,21 @@ func chooseNewChat(_ appElement: AXUIElement) throws {
 }
 
 func waitForComposer(_ appElement: AXUIElement, timeoutMs: Double) throws -> (AXUIElement, NodeRecord) {
-    try waitFor(timeoutMs, intervalMs: 250) {
-        let window = try chatWindow(appElement)
-        guard let item = composer(window) else { return nil }
-        return (window, item)
+    var sawWindowWithoutComposer = false
+    do {
+        return try waitFor(timeoutMs, intervalMs: 250) {
+            let window = try chatWindow(appElement)
+            guard let item = composer(window) else {
+                sawWindowWithoutComposer = true
+                return nil
+            }
+            return (window, item)
+        }
+    } catch {
+        if sawWindowWithoutComposer {
+            throw AxUploadError.message("No ChatGPT composer is available in the visible ChatGPT window")
+        }
+        throw error
     }
 }
 
@@ -728,11 +751,16 @@ func run(_ input: Input) throws -> [String: Any] {
     let timeoutMs = normalizeTimeoutMs(input.timeoutMs, fallback: 0)
     let stableMs = input.responseStableMs ?? 8_000
     let pollMs = input.pollIntervalMs ?? 2_000
+    let responseStartTimeoutMs = normalizeTimeoutMs(
+        input.responseStartTimeoutMs,
+        fallback: max(45_000, min(uploadTimeoutMs, 120_000))
+    )
     let deadline = timeoutMs > 0
         ? Date().addingTimeInterval(timeoutMs / 1000.0)
         : nil
     var captureState = AssistantCaptureState()
     var lastChangedAt = Date()
+    var responseStartedEver = false
 
     while deadline == nil || Date() < deadline! {
         sleepMs(pollMs)
@@ -752,6 +780,18 @@ func run(_ input: Input) throws -> [String: Any] {
         captureState = nextCaptureState
         let answering = state["isAnswering"] as? Bool ?? false
         let stableForMs = Date().timeIntervalSince(lastChangedAt) * 1000
+        if answering || !captureState.assistantText.isEmpty {
+            responseStartedEver = true
+        }
+        if !responseStartedEver &&
+            responseAccepted(state, prompt: input.prompt, captureState: captureState) &&
+            !captureState.incomplete &&
+            stableForMs >= responseStartTimeoutMs {
+            throw AxUploadError.coded(
+                "PSST_GPT_RESPONSE_NOT_STARTED",
+                "ChatGPT accepted the upload prompt but never started answering."
+            )
+        }
         if captureState.incomplete && !answering && stableForMs >= stableMs {
             throw AxUploadError.message(captureState.incompleteReason)
         }
@@ -779,8 +819,16 @@ do {
     let data = Data(CommandLine.arguments[1].utf8)
     let input = try JSONDecoder().decode(Input.self, from: data)
     try emit(try run(input))
+} catch let AxUploadError.coded(code, message) {
+    fail(code, message)
 } catch let AxUploadError.message(message) where message.localizedCaseInsensitiveContains("Accessibility") {
     fail("MACOS_ACCESSIBILITY_DISABLED", message)
+} catch let AxUploadError.message(message)
+    where message.localizedCaseInsensitiveContains("No ChatGPT window is available") {
+    fail("PSST_GPT_WINDOW_MISSING", message)
+} catch let AxUploadError.message(message)
+    where message.localizedCaseInsensitiveContains("No ChatGPT composer is available") {
+    fail("PSST_GPT_COMPOSER_MISSING", message)
 } catch let AxUploadError.message(message)
     where message.localizedCaseInsensitiveContains("visible ChatGPT transcript") ||
         message.localizedCaseInsensitiveContains("active prompt scrolled out") {

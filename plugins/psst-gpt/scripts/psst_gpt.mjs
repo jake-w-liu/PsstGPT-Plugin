@@ -805,7 +805,9 @@ export async function uploadAuditPsstGPT(options = {}) {
           waitChunkMs,
           statePath,
           relaySessionId,
-          background: true,
+          background: false,
+          useUploadRetryRelay: true,
+          uploadTimeoutMs,
           tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
         },
       });
@@ -856,7 +858,7 @@ export async function uploadAuditPsstGPT(options = {}) {
       });
     }
 
-    const result = await continuePsstGPT({
+    const result = await continuePsstGPTAfterUpload({
       prompt: [
         "FINAL UPLOAD AUDIT REQUEST.",
         `Bundle ID: ${bundle.bundleId}`,
@@ -867,7 +869,7 @@ export async function uploadAuditPsstGPT(options = {}) {
       waitChunkMs,
       statePath,
       relaySessionId,
-      background: true,
+      uploadTimeoutMs,
       tags: dedupe([...tags, "upload-bundle"]),
     });
     const substantiveResult = await ensureSubstantiveAuditResult({
@@ -880,7 +882,9 @@ export async function uploadAuditPsstGPT(options = {}) {
         waitChunkMs,
         statePath,
         relaySessionId,
-        background: true,
+        background: false,
+        useUploadRetryRelay: true,
+        uploadTimeoutMs,
         tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
       },
     });
@@ -1061,16 +1065,21 @@ async function relayPromptWithFileUploads({
   relaySessionId,
   tags = [],
   returnAfterSend = false,
+  skipFileValidation = false,
 }) {
   if (typeof prompt !== "string" || !prompt.trim()) {
     throw codedError("PROMPT_MISSING", "A non-empty prompt is required.");
   }
-  const normalizedFilePaths = await validateUploadFilePaths(filePaths);
+  const normalizedFilePaths = skipFileValidation
+    ? Array.isArray(filePaths) ? filePaths : []
+    : await validateUploadFilePaths(filePaths);
   if (normalizedFilePaths.length === 0) {
-    throw codedError(
-      "PSST_GPT_UPLOAD_FILES_MISSING",
-      "At least one absolute file path is required for upload relay."
-    );
+    if (!skipFileValidation) {
+      throw codedError(
+        "PSST_GPT_UPLOAD_FILES_MISSING",
+        "At least one absolute file path is required for upload relay."
+      );
+    }
   }
 
   await ensureForegroundUploadRelayReady();
@@ -1128,7 +1137,7 @@ async function relayPromptWithFileUploads({
     timeoutMs,
     waitChunkMs,
     allowPending: false,
-    background: true,
+    background: false,
     allowForegroundRecovery: true,
     responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
     onPending: async (pendingResult) => {
@@ -1195,6 +1204,53 @@ async function runDirectAxUploadRelay({
     genericFailureMessage: "ChatGPT app upload relay failed in the direct Accessibility backend.",
     invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
     invalidResponseMessage: "The direct Accessibility upload backend returned invalid JSON.",
+  });
+}
+
+async function continuePsstGPTAfterUpload({
+  prompt,
+  timeoutMs,
+  statePath,
+  relaySessionId,
+  tags = [],
+  uploadTimeoutMs = DEFAULT_UPLOAD_TIMEOUT_MS,
+}) {
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    throw codedError("PROMPT_MISSING", "A non-empty prompt is required.");
+  }
+  const promptText = prompt.trim();
+  const existingRecord = relaySessionId
+    ? await findStoredAppSessionByRelayId(relaySessionId, statePath)
+    : null;
+  const baseMessages = messagesForAppRelay(promptText, "", existingRecord?.messages);
+
+  const directResult = await runDirectAxUploadRelay({
+    prompt: promptText,
+    filePaths: [],
+    newChat: false,
+    timeoutMs,
+    uploadTimeoutMs,
+  });
+  const initialState = directResult.state ?? {};
+  assertNoFatalAppBlocker(initialState);
+
+  const record = await upsertAppSessionRecord({
+    statePath,
+    relaySessionId,
+    prompt: promptText,
+    title: initialState.title ?? "ChatGPT",
+    mode: initialState.visibleModelLabel,
+    background: false,
+    status: directResult.status ?? "complete",
+    messages: messagesForAppRelay(promptText, directResult.assistantText, baseMessages),
+    tags,
+  });
+
+  return appRelayResult({
+    status: directResult.status ?? "complete",
+    assistantText: directResult.assistantText,
+    state: initialState,
+    record,
   });
 }
 
@@ -2298,17 +2354,21 @@ async function ensureSubstantiveAuditResult({
 
   let latest = result;
   for (let attempt = 1; attempt <= normalizedRetryLimit; attempt += 1) {
-    latest = await continuePsstGPT({
+    const continueFn = relayOptions?.useUploadRetryRelay === true
+      ? continuePsstGPTAfterUpload
+      : continuePsstGPT;
+    const commonRelayOptions = {
       ...relayOptions,
-      newChat: false,
-      returnAfterSend: false,
-      returnPending: false,
       prompt: buildAuditRetryPrompt({
         bundleId,
         requestedPrompt,
         attempt,
       }),
-    });
+    };
+    if (relayOptions?.useUploadRetryRelay !== true) {
+      commonRelayOptions.background = true;
+    }
+    latest = await continueFn(commonRelayOptions);
     if (
       latest.status !== "complete" ||
       !isLikelyAcknowledgementOnlyAuditResponse(latest.assistantText)

@@ -603,8 +603,8 @@ export async function auditPsstGPT(options = {}) {
     ...relayOptions
   } = options;
   await preflight();
-  const bundle = isReadyAuditBundle(auditBundle)
-    ? auditBundle
+  const bundle = looksLikeAuditBundleRecord(auditBundle)
+    ? await validateProvidedAuditBundle(auditBundle)
     : await bundleFactory(
       bundleOptions ?? auditBundle ?? { root, outputDir, maxFileBytes, maxTotalBytes }
     );
@@ -736,7 +736,9 @@ export async function uploadAuditPsstGPT(options = {}) {
   if (!uploadBundle) {
     await preflight();
   }
-  const bundle = uploadBundle ?? await bundleFactory(
+  const bundle = uploadBundle
+    ? await validateProvidedUploadBundle(uploadBundle)
+    : await bundleFactory(
     bundleOptions ?? { root, outputDir, ...bundleOptionOverrides }
   );
   const finalPrompt = requestedPrompt || [
@@ -1924,11 +1926,122 @@ async function relayAuditBundleText({
   });
 }
 
-function isReadyAuditBundle(bundle) {
+function looksLikeAuditBundleRecord(bundle) {
   return Boolean(bundle) &&
     typeof bundle === "object" &&
-    typeof bundle.markdownPath === "string" &&
-    typeof bundle.bundleId === "string";
+    (
+      typeof bundle.markdownPath === "string" ||
+      typeof bundle.manifestPath === "string" ||
+      typeof bundle.bundleId === "string"
+    );
+}
+
+async function validateProvidedAuditBundle(bundle) {
+  if (!bundle || typeof bundle !== "object") {
+    throw codedError(
+      "PSST_GPT_AUDIT_BUNDLE_INVALID",
+      "Provided audit bundle must be an object."
+    );
+  }
+  if (typeof bundle.bundleId !== "string" || !bundle.bundleId.trim()) {
+    throw codedError(
+      "PSST_GPT_AUDIT_BUNDLE_INVALID",
+      "Provided audit bundle is missing bundleId."
+    );
+  }
+  if (typeof bundle.markdownPath !== "string" || !path.isAbsolute(bundle.markdownPath)) {
+    throw codedError(
+      "PSST_GPT_AUDIT_BUNDLE_INVALID",
+      "Provided audit bundle must include an absolute markdownPath.",
+      { bundleId: bundle.bundleId }
+    );
+  }
+  try {
+    const markdownStat = await stat(bundle.markdownPath);
+    if (!markdownStat.isFile()) {
+      throw codedError(
+        "PSST_GPT_AUDIT_BUNDLE_INVALID",
+        `Provided audit bundle markdownPath is not a file: ${bundle.markdownPath}`,
+        { bundleId: bundle.bundleId }
+      );
+    }
+  } catch (error) {
+    if (error?.code === "PSST_GPT_AUDIT_BUNDLE_INVALID") {
+      throw error;
+    }
+    throw codedError(
+      "PSST_GPT_AUDIT_BUNDLE_INVALID",
+      `Provided audit bundle markdownPath is not readable: ${bundle.markdownPath}`,
+      { bundleId: bundle.bundleId, cause: error }
+    );
+  }
+  return bundle;
+}
+
+async function validateProvidedUploadBundle(bundle) {
+  if (!bundle || typeof bundle !== "object") {
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      "Provided upload bundle must be an object."
+    );
+  }
+  if (typeof bundle.bundleId !== "string" || !bundle.bundleId.trim()) {
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      "Provided upload bundle is missing bundleId."
+    );
+  }
+  if (typeof bundle.outputDir !== "string" || !path.isAbsolute(bundle.outputDir)) {
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      "Provided upload bundle must include an absolute outputDir.",
+      { bundleId: bundle.bundleId }
+    );
+  }
+  try {
+    const outputDirStat = await stat(bundle.outputDir);
+    if (!outputDirStat.isDirectory()) {
+      throw codedError(
+        "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+        `Provided upload bundle outputDir is not a directory: ${bundle.outputDir}`,
+        { bundleId: bundle.bundleId }
+      );
+    }
+  } catch (error) {
+    if (error?.code === "PSST_GPT_UPLOAD_BUNDLE_INVALID") {
+      throw error;
+    }
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      `Provided upload bundle outputDir is not readable: ${bundle.outputDir}`,
+      { bundleId: bundle.bundleId, cause: error }
+    );
+  }
+
+  const candidateAttachmentPaths = Array.isArray(bundle.attachmentPaths) && bundle.attachmentPaths.length > 0
+    ? bundle.attachmentPaths
+    : [bundle.archivePath, ...(Array.isArray(bundle.shards) ? bundle.shards.map((shard) => shard?.path) : [])]
+      .filter(Boolean);
+  if (candidateAttachmentPaths.length === 0) {
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      "Provided upload bundle did not include any attachment file paths.",
+      { bundleId: bundle.bundleId }
+    );
+  }
+
+  const attachmentPaths = await validateUploadFilePaths(candidateAttachmentPaths).catch((error) => {
+    throw codedError(
+      "PSST_GPT_UPLOAD_BUNDLE_INVALID",
+      error?.message || "Provided upload bundle attachment paths are invalid.",
+      { bundleId: bundle.bundleId, cause: error }
+    );
+  });
+
+  return {
+    ...bundle,
+    attachmentPaths,
+  };
 }
 
 function chunkTextByLines(text, maxChars) {

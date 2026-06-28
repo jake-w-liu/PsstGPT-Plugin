@@ -856,7 +856,7 @@ test("auditPsstGPT uses a provided ready audit bundle without rebuilding it", as
         });
       },
     }),
-    { code: "ENOENT" }
+    { code: "PSST_GPT_AUDIT_BUNDLE_INVALID" }
   );
   assert.equal(bundleFactoryCalls, 0);
 });
@@ -950,6 +950,24 @@ test("uploadAuditPsstGPT preflights before creating the upload bundle", async ()
     { code: "PSST_GPT_WINDOW_SHELL_ONLY" }
   );
   assert.equal(bundleFactoryCalls, 0);
+});
+
+test("uploadAuditPsstGPT rejects an invalid provided upload bundle before relay", async () => {
+  await assert.rejects(
+    uploadAuditPsstGPT({
+      preflight: async () => {
+        throw new Error("preflight should not run when uploadBundle is provided");
+      },
+      uploadBundle: {
+        bundleId: "bundle-ready",
+        outputDir: "/definitely/missing/output",
+        attachmentPaths: ["/definitely/missing/source-archive.zip"],
+      },
+      timeoutMs: 1,
+      uploadTimeoutMs: 1,
+    }),
+    { code: "PSST_GPT_UPLOAD_BUNDLE_INVALID" }
+  );
 });
 
 test("createPsstGPTUploadBundle fails without leaving output when no uploadable files exist", async () => {

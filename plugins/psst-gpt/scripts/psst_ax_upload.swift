@@ -904,7 +904,8 @@ func run(_ input: Input) throws -> [String: Any] {
         if answering || !captureState.assistantText.isEmpty {
             responseStartedEver = true
         }
-        if !responseStartedEver &&
+        if responseStartTimeoutMs > 0 &&
+            !responseStartedEver &&
             responseAccepted(state, prompt: input.prompt, captureState: captureState) &&
             !captureState.incomplete &&
             stableForMs >= responseStartTimeoutMs {

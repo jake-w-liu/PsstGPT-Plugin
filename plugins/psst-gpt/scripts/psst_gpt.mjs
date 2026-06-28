@@ -24,7 +24,9 @@ const DEFAULT_RESPONSE_START_TIMEOUT_MS = 90 * 1000;
 const JXA_TIMEOUT_MS = 30000;
 const DEFAULT_BACKGROUND = true;
 const DEFAULT_UPLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+const DEFAULT_UPLOAD_RESPONSE_START_TIMEOUT_MS = 0;
 const DIRECT_AX_PROBE_TIMEOUT_MS = 30 * 1000;
+const DIRECT_AX_PROBE_TIMEOUT_RETRY_MS = 5 * 60 * 1000;
 // Rate-limit setup dialogs so missing permissions do not interrupt every run.
 const ACCESSIBILITY_REMINDER_COOLDOWN_MS = 24 * 60 * 60 * 1000;
 const ACCESSIBILITY_REMINDER_DIALOG_TIMEOUT_MS = 25000;
@@ -1084,6 +1086,10 @@ async function relayPromptWithFileUploads({
 
   await ensureForegroundUploadRelayReady();
   const promptText = prompt.trim();
+  const normalizedResponseStartTimeoutMs = normalizeResponseStartTimeoutMs(responseStartTimeoutMs, {
+    overallTimeoutMs: timeoutMs,
+    fallback: DEFAULT_RESPONSE_START_TIMEOUT_MS,
+  });
   const existingRecord = relaySessionId
     ? await findStoredAppSessionByRelayId(relaySessionId, statePath)
     : null;
@@ -1094,6 +1100,7 @@ async function relayPromptWithFileUploads({
     newChat: newChat !== false,
     timeoutMs,
     uploadTimeoutMs,
+    responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
     returnAfterSend: true,
   });
   const initialState = directResult.state ?? {};
@@ -1122,15 +1129,6 @@ async function relayPromptWithFileUploads({
   const normalizedUploadTimeoutMs = normalizeOverallTimeoutMs(
     uploadTimeoutMs,
     DEFAULT_UPLOAD_TIMEOUT_MS
-  );
-  const normalizedResponseStartTimeoutMs = normalizeResponseStartTimeoutMs(
-    responseStartTimeoutMs,
-    {
-      overallTimeoutMs: timeoutMs,
-      fallback: normalizedUploadTimeoutMs > 0
-        ? Math.max(45_000, Math.min(normalizedUploadTimeoutMs, 120_000))
-        : DEFAULT_RESPONSE_START_TIMEOUT_MS,
-    }
   );
   const result = await waitForAppAssistantResponseInChunks({
     prompt: promptText,
@@ -1181,6 +1179,7 @@ async function runDirectAxUploadRelay({
   newChat,
   timeoutMs,
   uploadTimeoutMs,
+  responseStartTimeoutMs = DEFAULT_UPLOAD_RESPONSE_START_TIMEOUT_MS,
   returnAfterSend = false,
 }) {
   const payload = {
@@ -1189,6 +1188,7 @@ async function runDirectAxUploadRelay({
     newChat,
     timeoutMs,
     uploadTimeoutMs,
+    responseStartTimeoutMs,
     responseStableMs: RESPONSE_STABLE_MS,
     pollIntervalMs: POLL_INTERVAL_MS,
     returnAfterSend,
@@ -1230,6 +1230,7 @@ async function continuePsstGPTAfterUpload({
     newChat: false,
     timeoutMs,
     uploadTimeoutMs,
+    responseStartTimeoutMs: 0,
   });
   const initialState = directResult.state ?? {};
   assertNoFatalAppBlocker(initialState);
@@ -1258,14 +1259,37 @@ async function probeDirectAxUploadRelayReady({
   restoreFrontmostOnExit = true,
   timeoutMs = DIRECT_AX_PROBE_TIMEOUT_MS,
 } = {}) {
-  return readDirectAxPsstGPTState({
-    restoreFrontmostOnExit,
-    timeoutMs,
-    genericFailureCode: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
-    genericFailureMessage: "ChatGPT app foreground upload readiness probe failed in the direct Accessibility backend.",
-    invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
-    invalidResponseMessage: "The direct Accessibility foreground probe returned invalid JSON.",
-  });
+  const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DIRECT_AX_PROBE_TIMEOUT_MS);
+  const attemptTimeouts = [normalizedTimeoutMs];
+  if (normalizedTimeoutMs > 0 && normalizedTimeoutMs < DIRECT_AX_PROBE_TIMEOUT_RETRY_MS) {
+    attemptTimeouts.push(DIRECT_AX_PROBE_TIMEOUT_RETRY_MS);
+  }
+  let lastFailure;
+  for (const attemptTimeoutMs of attemptTimeouts) {
+    try {
+      return await readDirectAxPsstGPTState({
+        restoreFrontmostOnExit,
+        timeoutMs: attemptTimeoutMs,
+        genericFailureCode: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
+        genericFailureMessage: "ChatGPT app foreground upload readiness probe failed in the direct Accessibility backend.",
+        invalidResponseCode: "PSST_GPT_DIRECT_AX_INVALID_RESPONSE",
+        invalidResponseMessage: "The direct Accessibility foreground probe returned invalid JSON.",
+      });
+    } catch (error) {
+      lastFailure = error;
+      if (!isDirectAxProbeRetryableTimeout(error) || attemptTimeoutMs === attemptTimeouts.at(-1)) {
+        throw error;
+      }
+    }
+  }
+  throw lastFailure;
+}
+
+function isDirectAxProbeRetryableTimeout(error = {}) {
+  if (error?.code !== "PSST_GPT_DIRECT_AX_PROBE_FAILED") {
+    return false;
+  }
+  return error?.cause?.killed === true || String(error?.cause?.signal || "").toUpperCase() === "SIGTERM";
 }
 
 async function readDirectAxPsstGPTState({
@@ -4868,6 +4892,7 @@ export const __testing = {
   buildDoctorResult,
   doctorNextStepsForError,
   ensureForegroundUploadRelayReady,
+  isDirectAxProbeRetryableTimeout,
   probeDoctorRelayMode,
   PSST_GPT_JXA,
   saveAppSessionStore,

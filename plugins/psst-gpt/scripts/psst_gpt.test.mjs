@@ -170,6 +170,18 @@ test("response start guard fails only when ChatGPT accepted the prompt but never
     }),
     false
   );
+
+  assert.equal(
+    __testing.shouldFailResponseStart({
+      responseStartedEver: false,
+      state: { composerValue: "", isAnswering: false },
+      prompt,
+      captureState: acceptedCapture,
+      stableForMs: 120000,
+      responseStartTimeoutMs: 0,
+    }),
+    false
+  );
 });
 
 test("response start timeout defaults to disabled when the overall timeout is disabled", () => {
@@ -406,6 +418,24 @@ test("foreground upload waits switch to the direct AX state reader after recover
     __testing.shouldUseDirectAxStateReaderForWait({
       allowForegroundRecovery: false,
       background: false,
+    }),
+    false
+  );
+});
+
+test("direct upload probe retries only on timeout failures", () => {
+  assert.equal(
+    __testing.isDirectAxProbeRetryableTimeout({
+      code: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
+      cause: { signal: "SIGTERM", killed: true },
+    }),
+    true
+  );
+
+  assert.equal(
+    __testing.isDirectAxProbeRetryableTimeout({
+      code: "PSST_GPT_DIRECT_AX_PROBE_FAILED",
+      cause: { message: "Could not connect" },
     }),
     false
   );

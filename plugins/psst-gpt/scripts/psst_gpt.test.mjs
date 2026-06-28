@@ -227,6 +227,76 @@ test("capture state fails loudly when a tail-only snapshot cannot be aligned", (
   );
 });
 
+test("assistant wait progress carries the response-start guard across polling chunks", () => {
+  const prompt = "Audit this upload";
+  let progress = __testing.createAssistantWaitProgress(1_000);
+
+  progress = __testing.advanceAssistantWaitProgress(
+    progress,
+    {
+      composerValue: "",
+      isAnswering: false,
+      transcriptTexts: [prompt],
+    },
+    prompt,
+    5_000
+  );
+
+  assert.equal(__testing.assistantWaitProgressStableForMs(progress, 94_000) >= 120_000, false);
+  assert.equal(
+    __testing.shouldFailResponseStart({
+      responseStartedEver: progress.responseStartedEver,
+      state: { composerValue: "", isAnswering: false },
+      prompt,
+      captureState: progress.captureState,
+      stableForMs: __testing.assistantWaitProgressStableForMs(progress, 126_000),
+      responseStartTimeoutMs: 120_000,
+    }),
+    true
+  );
+});
+
+test("assistant wait progress preserves captured assistant text across polling chunks", () => {
+  const prompt = "Audit the repository";
+  let progress = __testing.createAssistantWaitProgress(1_000);
+
+  progress = __testing.advanceAssistantWaitProgress(
+    progress,
+    {
+      isAnswering: true,
+      transcriptTexts: [
+        prompt,
+        "Confirmed bug in src/alpha.ts:101 with a long overlapping explanation",
+        "Confirmed bug in src/beta.ts:202 with another long overlapping explanation",
+      ],
+    },
+    prompt,
+    5_000
+  );
+  progress = __testing.advanceAssistantWaitProgress(
+    progress,
+    {
+      isAnswering: false,
+      transcriptTexts: [
+        "Confirmed bug in src/beta.ts:202 with another long overlapping explanation",
+        "Confirmed bug in src/gamma.ts:303 after the chunk boundary",
+      ],
+    },
+    prompt,
+    95_000
+  );
+
+  assert.equal(progress.captureState.incomplete, false);
+  assert.equal(
+    progress.captureState.assistantText,
+    [
+      "Confirmed bug in src/alpha.ts:101 with a long overlapping explanation",
+      "Confirmed bug in src/beta.ts:202 with another long overlapping explanation",
+      "Confirmed bug in src/gamma.ts:303 after the chunk boundary",
+    ].join("\n")
+  );
+});
+
 test("unsupported PsstGPT options fail explicitly", () => {
   assert.throws(
     () => __testing.assertSupportedAppRelayOptions({
@@ -705,5 +775,40 @@ test("createPsstGPTUploadBundle writes one source archive only", async () => {
     assert.doesNotMatch(archiveListing.stdout, /upload-manifest\.json/);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("persistUploadAuditFailure writes failure artifacts once a bundle exists", async () => {
+  const outputDir = await mkdtemp(path.join(os.tmpdir(), "psst-gpt-upload-failure-"));
+  try {
+    const bundle = {
+      bundleId: "bundle-failure-test",
+      outputDir,
+      archivePath: path.join(outputDir, "source-archive.zip"),
+      attachmentPaths: [path.join(outputDir, "source-archive.zip")],
+    };
+    await writeFile(bundle.archivePath, "zip-bytes", "utf8");
+
+    const failure = await __testing.persistUploadAuditFailure({
+      error: Object.assign(new Error("shell only"), { code: "PSST_GPT_WINDOW_SHELL_ONLY" }),
+      bundle,
+      requestedPrompt: "Audit the uploaded archive.",
+      attachmentPaths: bundle.attachmentPaths,
+      relaySessionId: "app-test",
+    });
+
+    assert.equal(failure.ok, false);
+    assert.equal(failure.status, "failed");
+    assert.equal(failure.code, "PSST_GPT_WINDOW_SHELL_ONLY");
+    assert.equal(await stat(failure.responsePath).then(() => true), true);
+    assert.equal(await stat(failure.resultPath).then(() => true), true);
+    const resultJson = JSON.parse(await readFile(failure.resultPath, "utf8"));
+    assert.equal(resultJson.code, "PSST_GPT_WINDOW_SHELL_ONLY");
+    assert.equal(resultJson.bundle.metadataPath.endsWith("upload-bundle.json"), true);
+    const responseText = await readFile(failure.responsePath, "utf8");
+    assert.match(responseText, /Upload Audit Failed/);
+    assert.match(responseText, /shell only/i);
+  } finally {
+    await rm(outputDir, { recursive: true, force: true });
   }
 });

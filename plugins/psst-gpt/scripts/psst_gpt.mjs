@@ -680,14 +680,55 @@ export async function uploadAuditPsstGPT(options = {}) {
     attachmentPaths,
     Math.max(1, Number(maxAttachmentsPerMessage) || DEFAULT_UPLOAD_MAX_ATTACHMENTS_PER_MESSAGE)
   );
+  try {
+    if (groups.length === 1) {
+      const result = await relayPromptWithFileUploads({
+        prompt: [
+          verifiedFinalPrompt,
+          "",
+          `PsstGPT upload bundle: ${bundle.bundleId}`,
+          `Attached files: ${attachmentPaths.map((filePath) => path.basename(filePath)).join(", ")}`,
+        ].join("\n"),
+        filePaths: groups[0],
+        newChat: true,
+        timeoutMs,
+        waitChunkMs,
+        uploadTimeoutMs,
+        statePath,
+        relaySessionId,
+        tags: dedupe([...tags, "upload-bundle"]),
+      });
+      const substantiveResult = await ensureSubstantiveAuditResult({
+        result,
+        requestedPrompt: verifiedFinalPrompt,
+        bundleId: bundle.bundleId,
+        retryLimit: options.auditAckRetryLimit,
+        relayOptions: {
+          timeoutMs,
+          waitChunkMs,
+          statePath,
+          relaySessionId,
+          background: true,
+          tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
+        },
+      });
+      const normalizedResult = await normalizeUploadAuditResult({
+        result: substantiveResult,
+        attachmentPaths,
+        requireVerification: !isExactOutputRequest(finalPrompt),
+        statePath,
+        relaySessionId,
+      });
+      return persistUploadAuditResult({ result: normalizedResult, bundle });
+    }
 
-  if (groups.length === 1) {
-    const result = await relayPromptWithFileUploads({
+    await relayPromptWithFileUploads({
       prompt: [
-        verifiedFinalPrompt,
-        "",
-        `PsstGPT upload bundle: ${bundle.bundleId}`,
-        `Attached files: ${attachmentPaths.map((filePath) => path.basename(filePath)).join(", ")}`,
+        `You will receive a PsstGPT upload bundle in ${groups.length} attachment groups.`,
+        "Do not audit until I send FINAL UPLOAD AUDIT REQUEST.",
+        "Read and retain the uploaded source archive zip files from each group.",
+        `Bundle ID: ${bundle.bundleId}`,
+        "Reply exactly: READY",
       ].join("\n"),
       filePaths: groups[0],
       newChat: true,
@@ -696,6 +737,40 @@ export async function uploadAuditPsstGPT(options = {}) {
       uploadTimeoutMs,
       statePath,
       relaySessionId,
+      tags: dedupe([...tags, "upload-bundle"]),
+    });
+
+    for (let index = 1; index < groups.length; index += 1) {
+      await relayPromptWithFileUploads({
+        prompt: [
+          `PsstGPT upload bundle attachment group ${index + 1}/${groups.length}.`,
+          `Bundle ID: ${bundle.bundleId}`,
+          `Attached files: ${groups[index].map((filePath) => path.basename(filePath)).join(", ")}`,
+          `Reply exactly: ACK ${index + 1}`,
+        ].join("\n"),
+        filePaths: groups[index],
+        newChat: false,
+        timeoutMs,
+        waitChunkMs,
+        uploadTimeoutMs,
+        statePath,
+        relaySessionId,
+        tags: dedupe([...tags, "upload-bundle"]),
+      });
+    }
+
+    const result = await continuePsstGPT({
+      prompt: [
+        "FINAL UPLOAD AUDIT REQUEST.",
+        `Bundle ID: ${bundle.bundleId}`,
+        verifiedFinalPrompt,
+        "Use only the uploaded source archive zip files already provided in this chat.",
+      ].join("\n"),
+      timeoutMs,
+      waitChunkMs,
+      statePath,
+      relaySessionId,
+      background: true,
       tags: dedupe([...tags, "upload-bundle"]),
     });
     const substantiveResult = await ensureSubstantiveAuditResult({
@@ -720,81 +795,28 @@ export async function uploadAuditPsstGPT(options = {}) {
       relaySessionId,
     });
     return persistUploadAuditResult({ result: normalizedResult, bundle });
-  }
-
-  await relayPromptWithFileUploads({
-    prompt: [
-      `You will receive a PsstGPT upload bundle in ${groups.length} attachment groups.`,
-      "Do not audit until I send FINAL UPLOAD AUDIT REQUEST.",
-      "Read and retain the uploaded source archive zip files from each group.",
-      `Bundle ID: ${bundle.bundleId}`,
-      "Reply exactly: READY",
-    ].join("\n"),
-    filePaths: groups[0],
-    newChat: true,
-    timeoutMs,
-    waitChunkMs,
-    uploadTimeoutMs,
-    statePath,
-    relaySessionId,
-    tags: dedupe([...tags, "upload-bundle"]),
-  });
-
-  for (let index = 1; index < groups.length; index += 1) {
-    await relayPromptWithFileUploads({
-      prompt: [
-        `PsstGPT upload bundle attachment group ${index + 1}/${groups.length}.`,
-        `Bundle ID: ${bundle.bundleId}`,
-        `Attached files: ${groups[index].map((filePath) => path.basename(filePath)).join(", ")}`,
-        `Reply exactly: ACK ${index + 1}`,
-      ].join("\n"),
-      filePaths: groups[index],
-      newChat: false,
-      timeoutMs,
-      waitChunkMs,
-      uploadTimeoutMs,
-      statePath,
+  } catch (error) {
+    const failure = await persistUploadAuditFailure({
+      error,
+      bundle,
+      requestedPrompt: verifiedFinalPrompt,
+      attachmentPaths,
       relaySessionId,
-      tags: dedupe([...tags, "upload-bundle"]),
     });
+    const enrichedError = codedError(
+      failure.code,
+      failure.message,
+      {
+        cause: error,
+        bundle: failure.bundle,
+        responsePath: failure.responsePath,
+        resultPath: failure.resultPath,
+        parsed: error?.parsed ?? null,
+        details: error?.details ?? null,
+      }
+    );
+    throw enrichedError;
   }
-
-  const result = await continuePsstGPT({
-    prompt: [
-      "FINAL UPLOAD AUDIT REQUEST.",
-      `Bundle ID: ${bundle.bundleId}`,
-      verifiedFinalPrompt,
-      "Use only the uploaded source archive zip files already provided in this chat.",
-    ].join("\n"),
-    timeoutMs,
-    waitChunkMs,
-    statePath,
-    relaySessionId,
-    background: true,
-    tags: dedupe([...tags, "upload-bundle"]),
-  });
-  const substantiveResult = await ensureSubstantiveAuditResult({
-    result,
-    requestedPrompt: verifiedFinalPrompt,
-    bundleId: bundle.bundleId,
-    retryLimit: options.auditAckRetryLimit,
-    relayOptions: {
-      timeoutMs,
-      waitChunkMs,
-      statePath,
-      relaySessionId,
-      background: true,
-      tags: dedupe([...tags, "upload-bundle", "audit-ack-retry"]),
-    },
-  });
-  const normalizedResult = await normalizeUploadAuditResult({
-    result: substantiveResult,
-    attachmentPaths,
-    requireVerification: !isExactOutputRequest(finalPrompt),
-    statePath,
-    relaySessionId,
-  });
-  return persistUploadAuditResult({ result: normalizedResult, bundle });
 }
 
 async function collectUploadFiles(root, {
@@ -1319,6 +1341,57 @@ async function persistUploadAuditResult({ result, bundle }) {
   await writeFile(responsePath, `${String(result.assistantText ?? "").trimEnd()}\n`, "utf8");
   const enriched = {
     ...result,
+    bundle: {
+      ...bundle,
+      metadataPath: bundlePath,
+    },
+    responsePath,
+    resultPath,
+  };
+  await writeFile(resultPath, `${JSON.stringify(enriched, null, 2)}\n`, "utf8");
+  return enriched;
+}
+
+async function persistUploadAuditFailure({
+  error,
+  bundle,
+  requestedPrompt,
+  attachmentPaths = [],
+  relaySessionId,
+}) {
+  const responsePath = path.join(bundle.outputDir, "chatgpt-audit-response.md");
+  const resultPath = path.join(bundle.outputDir, "chatgpt-audit-result.json");
+  const bundlePath = path.join(bundle.outputDir, "upload-bundle.json");
+  await writeFile(bundlePath, `${JSON.stringify(bundle, null, 2)}\n`, "utf8");
+  const code = error?.code ?? "PSST_GPT_UPLOAD_AUDIT_FAILED";
+  const message = error?.message ?? String(error);
+  const responseText = [
+    "# PsstGPT Upload Audit Failed",
+    "",
+    `Code: ${code}`,
+    "",
+    message,
+    "",
+    "No verified ChatGPT audit response was captured.",
+  ].join("\n");
+  await writeFile(responsePath, `${responseText}\n`, "utf8");
+  const enriched = {
+    ok: false,
+    status: "failed",
+    code,
+    message,
+    assistantText: "",
+    requestedPrompt,
+    relaySessionId: relaySessionId ?? null,
+    attachmentPaths,
+    error: {
+      code,
+      message,
+      details: error?.details ?? null,
+      parsed: error?.parsed ?? null,
+      stdout: error?.stdout ?? null,
+      stderr: error?.stderr ?? null,
+    },
     bundle: {
       ...bundle,
       metadataPath: bundlePath,
@@ -2058,6 +2131,7 @@ async function waitForAppAssistantResponseInChunks({
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   const normalizedWaitChunkMs = normalizePositiveDurationMs(waitChunkMs, DEFAULT_WAIT_CHUNK_MS);
   const started = Date.now();
+  let progress = createAssistantWaitProgress(started);
   let lastPending = null;
 
   while (normalizedTimeoutMs === 0 || Date.now() - started < normalizedTimeoutMs) {
@@ -2070,7 +2144,9 @@ async function waitForAppAssistantResponseInChunks({
       allowPending: true,
       background,
       responseStartTimeoutMs,
+      progress,
     });
+    progress = result.progress ?? progress;
 
     if (result.status === "complete") {
       return result;
@@ -2101,6 +2177,7 @@ async function waitForAppAssistantResponse({
   allowPending,
   background,
   responseStartTimeoutMs = DEFAULT_RESPONSE_START_TIMEOUT_MS,
+  progress = createAssistantWaitProgress(),
 }) {
   const normalizedTimeoutMs = normalizeOverallTimeoutMs(timeoutMs, DEFAULT_TIMEOUT_MS);
   const normalizedResponseStartTimeoutMs = normalizeOverallTimeoutMs(
@@ -2109,9 +2186,7 @@ async function waitForAppAssistantResponse({
   );
   const start = Date.now();
   let lastState = null;
-  let captureState = createAssistantCaptureState();
-  let lastChangedAt = Date.now();
-  let responseStartedEver = false;
+  let currentProgress = normalizeAssistantWaitProgress(progress, start);
 
   while (normalizedTimeoutMs === 0 || Date.now() - start < normalizedTimeoutMs) {
     await sleep(POLL_INTERVAL_MS);
@@ -2122,24 +2197,15 @@ async function waitForAppAssistantResponse({
     });
     assertNoFatalAppBlocker(state);
     lastState = state;
-
-    const nextCaptureState = advanceAssistantCaptureState(
-      captureState,
-      extractAssistantCaptureSnapshot(state, prompt)
-    );
-    if (didAssistantCaptureStateChange(captureState, nextCaptureState)) {
-      lastChangedAt = Date.now();
-    }
-    captureState = nextCaptureState;
-    if (state.isAnswering || captureState.assistantText) {
-      responseStartedEver = true;
-    }
+    currentProgress = advanceAssistantWaitProgress(currentProgress, state, prompt, Date.now());
+    const captureState = currentProgress.captureState;
+    const stableForMs = assistantWaitProgressStableForMs(currentProgress, Date.now());
     if (shouldFailResponseStart({
-      responseStartedEver,
+      responseStartedEver: currentProgress.responseStartedEver,
       state,
       prompt,
       captureState,
-      stableForMs: Date.now() - lastChangedAt,
+      stableForMs,
       responseStartTimeoutMs: normalizedResponseStartTimeoutMs,
     })) {
       throw codedError(
@@ -2155,7 +2221,7 @@ async function waitForAppAssistantResponse({
     if (
       captureState.incomplete &&
       !state.isAnswering &&
-      Date.now() - lastChangedAt >= RESPONSE_STABLE_MS
+      stableForMs >= RESPONSE_STABLE_MS
     ) {
       throw codedError(
         "PSST_GPT_RESPONSE_CAPTURE_INCOMPLETE",
@@ -2170,7 +2236,7 @@ async function waitForAppAssistantResponse({
 
     if (isAppResponseCompleteSnapshot({
       assistantText: captureState.assistantText,
-      textStableForMs: Date.now() - lastChangedAt,
+      textStableForMs: stableForMs,
       isAnswering: state.isAnswering,
       captureState,
     })) {
@@ -2178,6 +2244,7 @@ async function waitForAppAssistantResponse({
         status: "complete",
         assistantText: captureState.assistantText,
         state,
+        progress: currentProgress,
       };
     }
   }
@@ -2185,8 +2252,9 @@ async function waitForAppAssistantResponse({
   if (allowPending) {
     return {
       status: "pending",
-      assistantText: captureState.assistantText,
+      assistantText: currentProgress.captureState.assistantText,
       state: lastState,
+      progress: currentProgress,
     };
   }
 
@@ -2282,6 +2350,54 @@ function createAssistantCaptureState() {
     incompleteReason: "",
     lastVisibleAssistantText: "",
   };
+}
+
+function createAssistantWaitProgress(now = Date.now()) {
+  return {
+    captureState: createAssistantCaptureState(),
+    lastChangedAt: Number.isFinite(Number(now)) ? Math.floor(Number(now)) : Date.now(),
+    responseStartedEver: false,
+  };
+}
+
+function normalizeAssistantWaitProgress(progress = {}, now = Date.now()) {
+  const fallbackNow = Number.isFinite(Number(now)) ? Math.floor(Number(now)) : Date.now();
+  const captureState = {
+    ...createAssistantCaptureState(),
+    ...(progress.captureState ?? {}),
+  };
+  const lastChangedAt = Number.isFinite(Number(progress.lastChangedAt))
+    ? Math.floor(Number(progress.lastChangedAt))
+    : fallbackNow;
+  return {
+    captureState,
+    lastChangedAt,
+    responseStartedEver: progress.responseStartedEver === true || Boolean(captureState.assistantText),
+  };
+}
+
+function advanceAssistantWaitProgress(progress = {}, state = {}, prompt = "", now = Date.now()) {
+  const current = normalizeAssistantWaitProgress(progress, now);
+  const nextCaptureState = advanceAssistantCaptureState(
+    current.captureState,
+    extractAssistantCaptureSnapshot(state, prompt)
+  );
+  return {
+    captureState: nextCaptureState,
+    lastChangedAt: didAssistantCaptureStateChange(current.captureState, nextCaptureState)
+      ? Number.isFinite(Number(now)) ? Math.floor(Number(now)) : Date.now()
+      : current.lastChangedAt,
+    responseStartedEver:
+      current.responseStartedEver ||
+      state.isAnswering === true ||
+      Boolean(nextCaptureState.assistantText),
+  };
+}
+
+function assistantWaitProgressStableForMs(progress = {}, now = Date.now()) {
+  const current = normalizeAssistantWaitProgress(progress, now);
+  const currentNow = Number.isFinite(Number(now)) ? Math.floor(Number(now)) : Date.now();
+  return Math.max(0, currentNow - current.lastChangedAt);
 }
 
 function advanceAssistantCaptureState(currentState = createAssistantCaptureState(), snapshot = {}) {
@@ -2708,7 +2824,11 @@ function dispatch(action, payload) {
       allowWindowRecovery: payload.allowWindowRecovery === true,
       requireComposer: true
     }, function(context) {
-      return readState(context);
+      var composer = findComposerInWindow(context.window);
+      if (!composer) {
+        fail("PSST_GPT_COMPOSER_MISSING", "Could not find the ChatGPT app composer text area.");
+      }
+      return readMinimalState(context, composer);
     });
   }
   if (action === "snapshot") {
@@ -3855,6 +3975,9 @@ export const __testing = {
   extractAssistantCaptureSnapshot,
   createAssistantCaptureState,
   advanceAssistantCaptureState,
+  createAssistantWaitProgress,
+  advanceAssistantWaitProgress,
+  assistantWaitProgressStableForMs,
   mergeAssistantTails,
   transcriptContainsPrompt,
   isAppResponseCompleteSnapshot,
@@ -3884,6 +4007,7 @@ export const __testing = {
   shouldShowAccessibilityReminder,
   responseAcceptedFromAppState,
   shouldFailResponseStart,
+  persistUploadAuditFailure,
   buildVerifiedUploadAuditPrompt,
   parseUploadVerificationHeader,
 };

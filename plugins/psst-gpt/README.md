@@ -1,18 +1,20 @@
 # PsstGPT
 
-PsstGPT is a Codex plugin skill for relaying text prompts to the macOS ChatGPT desktop app and running source upload audits.
+PsstGPT is a Codex and Claude Code plugin skill for relaying text prompts to the macOS ChatGPT desktop app and running source upload audits.
 
 For the full install guide, see the repository [README](../../README.md).
 
 ## Invoke
 
-Use the skill directly:
+In Codex, use the skill directly:
 
 ```text
 $psst-gpt <task to send to the ChatGPT app>
 ```
 
 In Codex CLI, `/psst-gpt` is not the supported command path. Use `$psst-gpt`, or run `/skills` and select `psst-gpt`.
+
+In Claude Code there is no `$` prefix. The skill activates automatically when you ask for a task its description matches (relaying a prompt to the macOS ChatGPT app, or running a source upload audit), or you can ask for it by name, e.g. "use psst-gpt to send this to the ChatGPT app".
 
 ## Install (Claude Code)
 
@@ -25,7 +27,7 @@ claude plugin install psst-gpt@psst-gpt
 
 ## Accessibility Setup
 
-Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex. Depending on where you use Codex, that is usually the Codex app, Terminal, iTerm, VS Code, Cursor, or another editor host.
+Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex or Claude Code. Depending on where you use Codex or Claude Code, that is usually the Codex app, the Claude Code host, Terminal, iTerm, VS Code, Cursor, or another editor host.
 
 If macOS prompts for helper binaries while PsstGPT runs:
 
@@ -41,7 +43,7 @@ PsstGPT shows a local reminder on first use when Accessibility is missing, then 
 - macOS.
 - ChatGPT desktop app installed and signed in.
 - One ChatGPT app window already open.
-- Accessibility enabled for the app running Codex.
+- Accessibility enabled for the app running Codex or Claude Code.
 - `/usr/bin/osascript` approved if macOS prompts during text relay.
 - `/usr/bin/swift` approved if macOS prompts during upload relay.
 
@@ -69,7 +71,7 @@ Linux is not currently targeted because OpenAI's current desktop download page l
 - Supports strict-background codebase audits by packaging local text files into a line-numbered Markdown bundle and relaying it as text chunks.
 - Supports automatic source uploads for large codebase audits by packaging the tree into one `source-archive.zip`, using a direct Swift Accessibility helper for the native file picker, and saving the returned response locally.
 - Retries audit-final responses that are only short acknowledgements such as "I will audit..." instead of treating them as the completed audit. Exact-output marker prompts are not retried.
-- Returns `finalDeliveryText` for verbatim Codex delivery.
+- Returns `finalDeliveryText` for verbatim delivery by Codex or Claude Code.
 
 Unsupported options fail with `PSST_GPT_UNSUPPORTED_OPTION`.
 

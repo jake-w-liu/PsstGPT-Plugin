@@ -1,6 +1,6 @@
-# PsstGPT Codex Plugin
+# PsstGPT Codex and Claude Code Plugin
 
-PsstGPT lets Codex send prompts to the macOS ChatGPT desktop app, bring the assistant response back through macOS Accessibility, and optionally automate source-archive uploads for large codebase audits.
+PsstGPT lets Codex or Claude Code send prompts to the macOS ChatGPT desktop app, bring the assistant response back through macOS Accessibility, and optionally automate source-archive uploads for large codebase audits.
 
 It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT web internals. It uses macOS Accessibility and the ChatGPT macOS app's own UI.
 
@@ -9,6 +9,8 @@ It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT w
 > Credit: PsstGPT is an independent desktop-app implementation, inspired by the original Chrome-backed [GPT Relay](https://github.com/Toolsai/GPT-Relay-Codex-Plugin-) by Prompt Case. Thanks to him for the relay concept and Codex plugin workflow.
 
 ## Quick Start
+
+### Install (Codex)
 
 Install the marketplace:
 
@@ -36,9 +38,25 @@ psst-gpt@psst-gpt  installed, enabled
 
 Restart Codex or start a new Codex thread so the `psst-gpt` skill is loaded.
 
+### Install (Claude Code)
+
+Add the marketplace:
+
+```bash
+claude plugin marketplace add jake-w-liu/PsstGPT-Plugin
+```
+
+Install the plugin from that marketplace:
+
+```bash
+claude plugin install psst-gpt@psst-gpt
+```
+
+Restart Claude Code or start a new session so the `psst-gpt` skill is loaded.
+
 ## Accessibility Setup
 
-Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex. Depending on where you use Codex, that is usually the Codex app, Terminal, iTerm, VS Code, Cursor, or another editor host.
+Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex or Claude Code. Depending on where you use the assistant, that is usually the Codex app, the Claude Code host, Terminal, iTerm, VS Code, Cursor, or another editor host.
 
 When PsstGPT first needs UI automation, macOS may also prompt for the helper binaries that perform the relay:
 
@@ -47,7 +65,7 @@ When PsstGPT first needs UI automation, macOS may also prompt for the helper bin
 
 You normally do not enable Accessibility for `ChatGPT.app` itself. The controlling host app and helper binaries are the macOS permissions that matter for PsstGPT.
 
-The current Codex plugin install flow does not provide this plugin with a custom install-time setup callback. PsstGPT therefore shows its Accessibility reminder on first use when permission is missing, then rate-limits that reminder to at most once per day.
+The current Codex and Claude Code plugin install flows do not provide this plugin with a custom install-time setup callback. PsstGPT therefore shows its Accessibility reminder on first use when permission is missing, then rate-limits that reminder to at most once per day.
 
 ## Use It
 
@@ -67,6 +85,12 @@ Then select `psst-gpt` and add the task you want sent to the ChatGPT app.
 
 In the Codex desktop app, type `/` and select the enabled `psst-gpt` skill from the command list, then add your task.
 
+In Claude Code there is no `$` prefix. The `psst-gpt` skill activates automatically when you ask for the relevant task and its description matches, or you can ask for it by name:
+
+```text
+Use psst-gpt to plan this refactor in the ChatGPT app and bring the result back.
+```
+
 ### Important: Not `/psst-gpt` In Codex CLI
 
 Codex CLI currently documents plugin skills as `$skill-name` invocations or `/skills` selections. A plugin does not automatically create a top-level CLI slash command like `/psst-gpt`.
@@ -77,13 +101,15 @@ If you type `/pss` in Codex CLI and see `no matches`, that means you are using t
 $psst-gpt Your task here
 ```
 
+In Claude Code there is no `$psst-gpt` or `/psst-gpt` command either. Just describe the task and the `psst-gpt` skill activates when its description matches, or ask for it by name (for example, "Use psst-gpt to ...").
+
 ## Required Setup
 
 - macOS.
 - ChatGPT desktop app installed in `/Applications` or `~/Applications`.
 - ChatGPT app signed in and ready to use.
 - One ChatGPT app window already open somewhere on the desktop.
-- macOS Accessibility enabled for the app running Codex.
+- macOS Accessibility enabled for the app running Codex or Claude Code.
 - `/usr/bin/osascript` approved if macOS prompts during text relay.
 - `/usr/bin/swift` approved if macOS prompts during upload relay.
 
@@ -107,13 +133,13 @@ The repository should not ship a Windows backend until it has been tested on Win
 
 When you invoke PsstGPT:
 
-1. Codex loads the `psst-gpt` skill.
+1. Codex or Claude Code loads the `psst-gpt` skill.
 2. The helper wakes `ChatGPT.app` with `open -g`.
 3. It finds the existing ChatGPT app window through Accessibility.
 4. It writes your prompt into the app composer.
 5. It presses the app send button through `AXPress`.
 6. It waits for the assistant response to stabilize and fails if it cannot prove the capture is complete.
-7. It returns `finalDeliveryText` to Codex.
+7. It returns `finalDeliveryText` to the assistant.
 
 The ChatGPT app is not activated or brought to the foreground during the verified strict-background text flow. The upload workflow is foreground automatic because the macOS file picker is a visible native UI, and if macOS Accessibility later drops the chat window into a transient shell-only state during that same upload wait, PsstGPT may re-foreground ChatGPT once to recover the usable window instead of failing immediately.
 
@@ -134,7 +160,7 @@ $psst-gpt Think through a migration plan for this codebase. Return a concise imp
 ```
 
 ```text
-$psst-gpt Review this architecture decision and list the biggest risks before Codex starts editing.
+$psst-gpt Review this architecture decision and list the biggest risks before the assistant starts editing.
 ```
 
 ```text
@@ -232,11 +258,11 @@ The harness creates a tiny marker project, routes through the same `task` planne
 
 ### `/pss` Shows `no matches`
 
-Use `$psst-gpt`, or run `/skills` and select `psst-gpt`. Codex CLI does not currently expose this plugin as a top-level `/psst-gpt` slash command.
+In Codex CLI, use `$psst-gpt`, or run `/skills` and select `psst-gpt`. Codex CLI does not currently expose this plugin as a top-level `/psst-gpt` slash command. In Claude Code, there is no `$` prefix or `/psst-gpt` command: describe the task and the skill activates when its description matches, or ask for `psst-gpt` by name.
 
 ### `psst-gpt` Does Not Appear
 
-Check installation:
+In Codex, check installation:
 
 ```bash
 codex plugin list | grep psst-gpt
@@ -250,6 +276,15 @@ codex plugin add psst-gpt@psst-gpt
 ```
 
 Then restart Codex or start a new thread.
+
+In Claude Code, reinstall with:
+
+```bash
+claude plugin marketplace add jake-w-liu/PsstGPT-Plugin
+claude plugin install psst-gpt@psst-gpt
+```
+
+Then restart Claude Code or start a new session.
 
 ### Marketplace Is Named `personal`
 
@@ -267,9 +302,9 @@ Open a ChatGPT app window manually, leave it open, then rerun PsstGPT. The relay
 
 ### Accessibility Fails
 
-Open **System Settings > Privacy & Security > Accessibility** and enable the app that is running Codex, such as the Codex app, Terminal, iTerm, VS Code, or Cursor. If macOS separately prompts while PsstGPT is running, also allow `/usr/bin/osascript` for text relay and `/usr/bin/swift` for upload relay.
+Open **System Settings > Privacy & Security > Accessibility** and enable the app that is running Codex or Claude Code, such as the Codex app, the Claude Code host, Terminal, iTerm, VS Code, or Cursor. If macOS separately prompts while PsstGPT is running, also allow `/usr/bin/osascript` for text relay and `/usr/bin/swift` for upload relay.
 
-PsstGPT now shows a local reminder dialog when it detects missing Accessibility, but it cannot run a custom installer popup during `codex plugin add`.
+PsstGPT now shows a local reminder dialog when it detects missing Accessibility, but it cannot run a custom installer popup during `codex plugin add` or `claude plugin install`.
 
 ### Unsupported Option
 

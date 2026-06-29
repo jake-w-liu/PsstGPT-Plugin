@@ -13,7 +13,7 @@ It does not use Chrome, Playwright, browser cookies, local storage, or ChatGPT w
 Install the marketplace:
 
 ```bash
-codex plugin marketplace add jake-w-liu/PsstGPT-Codex-Plugin
+codex plugin marketplace add jake-w-liu/PsstGPT-Plugin
 ```
 
 Install the plugin from that marketplace:
@@ -245,7 +245,7 @@ codex plugin list | grep psst-gpt
 If it is missing or says `not installed`, run:
 
 ```bash
-codex plugin marketplace add jake-w-liu/PsstGPT-Codex-Plugin
+codex plugin marketplace add jake-w-liu/PsstGPT-Plugin
 codex plugin add psst-gpt@psst-gpt
 ```
 
@@ -257,7 +257,7 @@ An early build used the marketplace name `personal`. Remove it and add the curre
 
 ```bash
 codex plugin marketplace remove personal
-codex plugin marketplace add jake-w-liu/PsstGPT-Codex-Plugin
+codex plugin marketplace add jake-w-liu/PsstGPT-Plugin
 codex plugin add psst-gpt@psst-gpt
 ```
 

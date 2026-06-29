@@ -14,6 +14,15 @@ $psst-gpt <task to send to the ChatGPT app>
 
 In Codex CLI, `/psst-gpt` is not the supported command path. Use `$psst-gpt`, or run `/skills` and select `psst-gpt`.
 
+## Install (Claude Code)
+
+PsstGPT also installs as a Claude Code plugin:
+
+```bash
+claude plugin marketplace add jake-w-liu/PsstGPT-Plugin
+claude plugin install psst-gpt@psst-gpt
+```
+
 ## Accessibility Setup
 
 Before first use, open macOS **System Settings > Privacy & Security > Accessibility** and turn on the app that is running Codex. Depending on where you use Codex, that is usually the Codex app, Terminal, iTerm, VS Code, Cursor, or another editor host.

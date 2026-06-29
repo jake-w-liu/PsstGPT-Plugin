@@ -2,7 +2,7 @@
   "name": "psst-gpt",
   "version": "0.1.4+codex.20260628145419",
   "description": "Relay Codex prompts and source upload audits through the ChatGPT macOS desktop app.",
-  "repository": "https://github.com/jake-w-liu/PsstGPT-Codex-Plugin",
+  "repository": "https://github.com/jake-w-liu/PsstGPT-Plugin",
   "author": {
     "name": "PsstGPT Contributors"
   },

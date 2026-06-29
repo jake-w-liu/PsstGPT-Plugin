@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "psst-gpt",
+  "description": "Relay prompts and source upload audits through the ChatGPT macOS desktop app.",
+  "owner": {
+    "name": "PsstGPT Contributors"
+  },
+  "plugins": [
+    {
+      "name": "psst-gpt",
+      "description": "Relay prompts and source upload audits through the ChatGPT macOS desktop app.",
+      "source": "./plugins/psst-gpt",
+      "category": "productivity"
+    }
+  ]
+}

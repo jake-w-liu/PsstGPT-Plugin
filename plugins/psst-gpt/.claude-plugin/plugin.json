@@ -1,0 +1,19 @@
+{
+  "name": "psst-gpt",
+  "version": "0.1.4",
+  "description": "Relay prompts and source upload audits through the ChatGPT macOS desktop app.",
+  "author": {
+    "name": "PsstGPT Contributors"
+  },
+  "homepage": "https://github.com/jake-w-liu/PsstGPT-Plugin",
+  "repository": "https://github.com/jake-w-liu/PsstGPT-Plugin",
+  "keywords": [
+    "chatgpt",
+    "macos",
+    "accessibility",
+    "automation",
+    "codebase-audit",
+    "desktop-app",
+    "relay"
+  ]
+}
